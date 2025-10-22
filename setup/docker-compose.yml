@@ -30,7 +30,11 @@ services:
       start_period: 90s
 
   ansible:
-    image: quay.io/ansible/ansible-runner:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        COLL_VER: "3.10.0"   # change if you want a different release
     container_name: ansible
     working_dir: /work
     volumes:
@@ -40,8 +44,7 @@ services:
       # useful defaults for your GitLab seeding playbook
       GITLAB_URL: http://172.16.0.2:80
     # keep it running so you can exec into it, or override with `docker compose run`
-    command: >
-      ansible-playbook seed.yml
+    command: bash /work/entryscript.sh
     # change command to what is needed
     networks:
       public: {}

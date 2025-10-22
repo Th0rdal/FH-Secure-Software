@@ -1,0 +1,32 @@
+---
+- name: Rotate GitLab root password via rails runner
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    new_gitlab_root_password: "2ada54772a7bb!"
+    gitlab_base_url: "http://gitlab"
+    gitlab_container_name: "gitlab"
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
+  tasks:
+    - name: Change root password via rails runner (through Docker API)
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        env:
+          NEWPW: "{{ new_gitlab_root_password }}"
+        command: >-
+          gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
+          u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
+      register: exec_out
+
+    - name: Mark changed only when OK appears
+      ansible.builtin.set_fact:
+        _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
+      changed_when: "{{ _changed }}"
+      failed_when: "{{ exec_out.rc|default(0) != 0 or not _changed }}"
+
+    - name: Show rails-runner output
+      ansible.builtin.debug:
+        var: exec_out

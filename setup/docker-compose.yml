@@ -9,11 +9,15 @@ services:
       - "80:80"
       - "443:443"
       - "2222:22"
-    volumes:
+    #volumes:
       #- config:/etc/gitlab
       #- logs:/var/log/gitlab
       #- data:/var/opt/gitlab
-      - ./gitlab.rb:/etc/gitlab/gitlab.rb:ro
+    environment:
+      GITLAB_ROOT_PASSWORD: "2ada54772a7b!"
+      GITLAB_OMNIBUS_CONFIG: |
+        letsencrypt['enable'] = false
+        gitlab_rails['initial_root_password_expiration'] = false
     networks:
       public: {}
       backend:
@@ -31,11 +35,10 @@ services:
     working_dir: /work
     volumes:
       - ./seedGitlab/:/work:rw            # your playbooks live here
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       # useful defaults for your GitLab seeding playbook
       GITLAB_URL: http://172.16.0.2:80
-      DOCKER_HOST: ${DOCKER_HOST:-}
     # keep it running so you can exec into it, or override with `docker compose run`
     command: >
       ansible-playbook seed.yml

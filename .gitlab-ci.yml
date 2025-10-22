@@ -1,0 +1,65 @@
+stages: [test, unlock]
+
+default:
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache bash curl jq git
+    - chmod +x ./ci.sh
+
+variables:
+  GIT_STRATEGY: fetch
+
+# ---- Stage 1: Tests
+test:
+  stage: test
+  script:
+    - ./ci.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+
+# ---- Stage 2: Nächstes Repo lokal freischalten
+unlock_next_repo:
+  stage: unlock
+  needs: ["test"]
+  script:
+    - |
+      set -euo pipefail
+
+      : "${GITLAB_API_TOKEN:?GITLAB_API_TOKEN fehlt}"
+      : "${NEXT_PROJECT_ID:?NEXT_PROJECT_ID fehlt}"   # numerische ID vom nächsten Repo
+      : "${TARGET_USERNAME:?TARGET_USERNAME fehlt}"   # z.B. 'player1'
+
+      api="${CI_SERVER_URL%/}/api/v4"
+
+      echo "==> Hole User-ID zu Benutzername ${TARGET_USERNAME} …"
+      # GET /users?username=:username
+      USER_ID=$(curl -sf --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+        "${api}/users?username=${TARGET_USERNAME}" | jq -r '.[0].id')
+
+      if [ -z "${USER_ID}" ] || [ "${USER_ID}" = "null" ]; then
+        echo "Konnte USER_ID nicht ermitteln."
+        exit 2
+      fi
+
+      echo "==> Prüfe Mitgliedschaft im Zielprojekt ${NEXT_PROJECT_ID} …"
+      if curl -sf --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+           "${api}/projects/${NEXT_PROJECT_ID}/members/${USER_ID}" >/dev/null; then
+        echo "User ist schon Member – setze Zugriffsebene (Developer) …"
+        curl -sf -X PUT --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --data "access_level=30" \
+          "${api}/projects/${NEXT_PROJECT_ID}/members/${USER_ID}" >/dev/null
+      else
+        echo "Füge User als Member (Developer) hinzu …"
+        curl -sf -X POST --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --data "user_id=${USER_ID}" \
+          --data "access_level=30" \
+          "${api}/projects/${NEXT_PROJECT_ID}/members" >/dev/null
+      fi
+
+      echo "==> Nächstes Repo freigeschaltet ✅"
+  rules:
+    - if: '$CI_JOB_STATUS == "success"'
+      when: on_success

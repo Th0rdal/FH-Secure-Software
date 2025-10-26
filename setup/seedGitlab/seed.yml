@@ -1,32 +1,102 @@
 ---
-- name: Rotate GitLab root password via rails runner
+- name: Bootstrap GitLab & Shared Runner
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
     new_gitlab_root_password: "2ada54772a7bb!"
-    gitlab_base_url: "http://gitlab"
+    gitlab_base_url: "http://gitlab" # interne URL
     gitlab_container_name: "gitlab"
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # Zielpfad für die .env-Datei. '/project' ist dein '.'-Verzeichnis.
+    runner_env_path: "/project/runner.env"
+    compose_chdir: "/project"
 
   tasks:
-    - name: Change root password via rails runner (through Docker API)
+    # # --- Dein bestehender Task zum Ändern des Passworts ---
+    # - name: Change root password via rails runner (through Docker API)
+    #   community.docker.docker_container_exec:
+    #     container: "{{ gitlab_container_name }}"
+    #     env:
+    #       NEWPW: "{{ new_gitlab_root_password }}"
+    #     command: >-
+    #       gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
+    #       u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
+    #   register: exec_out
+
+    # - name: Mark changed only when OK appears
+    #   ansible.builtin.set_fact:
+    #     _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
+    #   changed_when: _changed
+    #   failed_when: exec_out.rc|default(0) != 0 or not _changed
+
+    # - name: Show rails-runner output
+    #   ansible.builtin.debug:
+    #     var: exec_out
+
+    # --- NEUER TASK 1: Runner Token auslesen ---
+    - name: Get the Instance Runner Registration Token
       community.docker.docker_container_exec:
         container: "{{ gitlab_container_name }}"
-        env:
-          NEWPW: "{{ new_gitlab_root_password }}"
+        # Dieser Befehl liest den globalen Runner-Registrierungs-Token aus
+        # Dieser Befehl ist mit GitLab 17+ kompatibel
         command: >-
-          gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
-          u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
-      register: exec_out
+          gitlab-rails runner "puts Gitlab::CurrentSettings.current_application_settings.runners_registration_token"
+      register: runner_token_raw
+      changed_when: false
 
-    - name: Mark changed only when OK appears
+    # --- (Der Rest deines Playbooks bleibt gleich) ---
+    - name: Extract runner token
       ansible.builtin.set_fact:
-        _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
-      changed_when: "{{ _changed }}"
-      failed_when: "{{ exec_out.rc|default(0) != 0 or not _changed }}"
+        runner_token: "{{ runner_token_raw.stdout | trim }}"
 
-    - name: Show rails-runner output
+    - name: Show new runner token
       ansible.builtin.debug:
-        var: exec_out
+        var: runner_token
+        verbosity: 1
+
+    # --- NEUER TASK 2: Token extrahieren ---
+    - name: Extract runner token
+      ansible.builtin.set_fact:
+        # 'trim' entfernt eventuelle Leerzeilen/Zeilenumbrüche
+        runner_token: "{{ runner_token_raw.stdout | trim }}"
+
+    - name: Show new runner token
+      ansible.builtin.debug:
+        var: runner_token
+        verbosity: 1
+
+    - name: Ensure runner_init.sh is executable
+      # Der Pfad /project/runner_init.sh referenziert die Datei
+      # auf dem Host, da das /project-Volume gemountet ist.
+      ansible.builtin.file:
+        path: "/project/seedGitlab/runner_init.sh"
+        mode: "0755" # Setzt die Ausführungsberechtigung (+x) für den Besitzer und die Gruppe
+
+    # --- NEUER TASK 3: config.toml Datei schreiben ---
+    - name: Create explicit config.toml for gitlab-runner
+      ansible.builtin.copy:
+        # /project/ ist der Mount-Punkt für dein '.'-Verzeichnis auf dem Host
+        dest: "/project/runner.env"
+        mode: "0644"
+        # Dies ist eine minimale, funktionierende config.toml
+        content: |
+          # Diese Datei wird von seed.yml automatisch generiert
+          # WICHTIG: RUNNER_TOKEN (NICHT token=)
+          RUNNER_TOKEN={{ runner_token }}
+
+          # Diese Variablen werden ebenfalls vom Entrypoint gelesen:
+          CI_SERVER_URL={{ gitlab_base_url }}
+          RUNNER_EXECUTOR=docker
+          DOCKER_IMAGE=alpine:3.20
+          RUNNER_DESCRIPTION=local-docker-runner
+          RUNNER_TAG_LIST=local,docker
+          RUNNER_RUN_UNTAGGED=true
+          RUNNER_LOCKED=false
+      register: env_file_written
+
+    - name: Show env file write status
+      ansible.builtin.debug:
+        var: env_file_written.dest
+        verbosity: 1

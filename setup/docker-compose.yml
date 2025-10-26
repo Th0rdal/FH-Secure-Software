@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   gitlab:
     image: gitlab/gitlab-ce:17.8.1-ce.0
@@ -10,9 +8,9 @@ services:
       - "443:443"
       - "2222:22"
     #volumes:
-      #- config:/etc/gitlab
-      #- logs:/var/log/gitlab
-      #- data:/var/opt/gitlab
+    #- config:/etc/gitlab
+    #- logs:/var/log/gitlab
+    #- data:/var/opt/gitlab
     environment:
       GITLAB_ROOT_PASSWORD: "2ada54772a7b!"
       GITLAB_OMNIBUS_CONFIG: |
@@ -20,41 +18,71 @@ services:
         gitlab_rails['initial_root_password_expiration'] = false
     networks:
       public: {}
-      backend:
-        ipv4_address: 172.16.0.2
+      backend: {}
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost/-/health >/dev/null || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost/-/health >/dev/null || exit 1",
+        ]
       interval: 10s
       timeout: 30s
       retries: 40
       start_period: 90s
+
+  gitlab-runner:
+    image: gitlab/gitlab-runner:alpine
+    container_name: gitlab-runner
+    restart: always
+    depends_on:
+      ansible:
+        condition: service_completed_successfully
+
+    env_file:
+      - ./runner.env
+
+    volumes:
+      # Volume für config.toml beibehalten
+      - runner-config:/etc/gitlab-runner
+      # Mounten Sie den seedGitlab Ordner in den Runner-Container
+      - ./seedGitlab:/seedGitlab
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      backend: {}
+
+    # NEU: Entfernen Sie den entrypoint: und verwenden Sie nur command:
+    # Führen Sie das Skript direkt aus.
+    entrypoint: /seedGitlab/runner_init.sh
 
   ansible:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        COLL_VER: "3.10.0"   # change if you want a different release
+        COLL_VER: "3.10.0" # Dieses Argument wird an dein Dockerfile übergeben
     container_name: ansible
     working_dir: /work
     volumes:
-      - ./seedGitlab/:/work:rw            # your playbooks live here
+      - ./:/project:rw
+      - ./seedGitlab/:/work:rw
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      # useful defaults for your GitLab seeding playbook
-      GITLAB_URL: http://172.16.0.2:80
-    # keep it running so you can exec into it, or override with `docker compose run`
-    command: bash /work/entryscript.sh
-    # change command to what is needed
+      GITLAB_URL: http://gitlab
+
+    # DIESE ZEILE ERSETZT DEIN GESAMTES ENTRYSCRIPT:
+    # Es führt das Playbook direkt aus, nachdem der Container
+    # (mit allen Installationen aus dem Dockerfile) gestartet wurde.
+    command: ["ansible-playbook", "/work/seed.yml"]
+
     networks:
       public: {}
-      backend:
-        ipv4_address: 172.16.0.3
+      backend: {}
     depends_on:
       gitlab:
         condition: service_healthy
 
-#volumes:
+volumes:
+  runner-config: {}
 #  config:
 #  logs:
 #  data:
@@ -63,6 +91,3 @@ networks:
   public:
     driver: bridge
   backend:
-    ipam:
-      config:
-        - subnet: 172.16.0.0/29

@@ -17,7 +17,8 @@ RUN python -m pip install --upgrade pip \
       "ansible-core==2.16.6" \
       "docker==6.1.3" \
       "requests==2.31.0" \
-      "requests-unixsocket==0.3.0"
+      "requests-unixsocket==0.3.0" \
+      "python-gitlab==4.5.0"
 
 # Preinstall community.docker (pin a known-good version)
 ARG COLL_VER="3.10.0"
@@ -25,6 +26,13 @@ RUN ansible-galaxy collection download community.docker:==${COLL_VER} -p /tmp \
  && ansible-galaxy collection install /tmp/community-docker-${COLL_VER}.tar.gz \
       -p /usr/share/ansible/collections \
  && rm -f /tmp/community-docker-${COLL_VER}.tar.gz
+
+# HIER NEU EINFÜGEN: Installiere community.general für GitLab Module
+ARG GEN_COLL_VER="8.4.0" # Eine stabile Version wählen
+RUN ansible-galaxy collection download community.general:==${GEN_COLL_VER} -p /tmp \
+ && ansible-galaxy collection install /tmp/community-general-${GEN_COLL_VER}.tar.gz \
+      -p /usr/share/ansible/collections \
+ && rm -f /tmp/community-general-${GEN_COLL_VER}.tar.gz
 
 WORKDIR /work
 CMD ["bash"]

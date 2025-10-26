@@ -9,32 +9,86 @@
     gitlab_base_url: "http://gitlab" # interne URL
     gitlab_container_name: "gitlab"
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    riddle_username: "riddle"
+    riddle_user_password: "sadfsadf32!"
+    riddle_email: "riddle@local.lab"
+    puzzle_projects:
+      - name: "riddle-01-start"
+        path: "riddle-01"
+      - name: "riddle-02-ci-key"
+        path: "riddle-02"
+      - name: "riddle-03-deploy"
+        path: "riddle-03"
     # Zielpfad für die .env-Datei. '/project' ist dein '.'-Verzeichnis.
     runner_env_path: "/project/runner.env"
     compose_chdir: "/project"
 
   tasks:
-    # # --- Dein bestehender Task zum Ändern des Passworts ---
-    # - name: Change root password via rails runner (through Docker API)
-    #   community.docker.docker_container_exec:
-    #     container: "{{ gitlab_container_name }}"
-    #     env:
-    #       NEWPW: "{{ new_gitlab_root_password }}"
-    #     command: >-
-    #       gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
-    #       u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
-    #   register: exec_out
+    # --- Dein bestehender Task zum Ändern des Passworts ---
+    - name: Change root password via rails runner (through Docker API)
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        env:
+          NEWPW: "{{ new_gitlab_root_password }}"
+        command: >-
+          gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
+          u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
+      register: exec_out
 
-    # - name: Mark changed only when OK appears
-    #   ansible.builtin.set_fact:
-    #     _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
-    #   changed_when: _changed
-    #   failed_when: exec_out.rc|default(0) != 0 or not _changed
+    - name: Mark changed only when OK appears
+      ansible.builtin.set_fact:
+        _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
+      changed_when: _changed
+      failed_when: exec_out.rc|default(0) != 0 or not _changed
 
-    # - name: Show rails-runner output
-    #   ansible.builtin.debug:
-    #     var: exec_out
+    - name: Show rails-runner output
+      ansible.builtin.debug:
+        var: exec_out
 
+    # ######################################
+    # 2. PUZZLE SETUP (USER AND PROJECTS)
+    # ######################################
+    - name: Create 'riddle' user
+      community.general.gitlab_user:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        name: "User Riddle"
+        username: "{{ riddle_username }}"
+        email: "{{ riddle_email }}"
+        password: "{{ riddle_user_password }}"
+        state: "present"
+      register: riddle_user_details
+
+    - name: Extract riddle user ID for later use in CI/CD
+      ansible.builtin.set_fact:
+        riddle_user_id: "{{ riddle_user_details.user.id }}"
+
+    - name: Create all puzzle repositories
+      community.general.gitlab_project:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        name: "{{ item.name }}"
+        path: "{{ item.path }}"
+        state: "present"
+        visibility: "private"
+        initialize_with_readme: true
+      loop: "{{ puzzle_projects }}"
+
+    - name: Grant 'riddle' Developer access to the first puzzle (riddle-01-start)
+      community.general.gitlab_project_members:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        project: "{{ puzzle_projects[0].path }}"
+        gitlab_user: "{{ riddle_username }}"
+        access_level: "developer"
+        state: "present"
+
+    # ######################################
+    # 3. RUNNER SETUP
+    # ######################################
     # --- NEUER TASK 1: Runner Token auslesen ---
     - name: Get the Instance Runner Registration Token
       community.docker.docker_container_exec:

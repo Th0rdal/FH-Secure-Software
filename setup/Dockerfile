@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
+    git \
  && rm -rf /var/lib/apt/lists/*
 
 # Use the *singular* env var, set interpreter path, and make Docker socket explicit
@@ -33,6 +34,7 @@ RUN ansible-galaxy collection download community.general:==${GEN_COLL_VER} -p /t
  && ansible-galaxy collection install /tmp/community-general-${GEN_COLL_VER}.tar.gz \
       -p /usr/share/ansible/collections \
  && rm -f /tmp/community-general-${GEN_COLL_VER}.tar.gz
+
 
 WORKDIR /work
 CMD ["bash"]

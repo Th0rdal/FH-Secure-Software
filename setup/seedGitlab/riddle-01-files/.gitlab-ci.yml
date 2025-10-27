@@ -1,0 +1,18 @@
+stages:
+  - test
+
+run_riddle_test:
+  stage: test
+  image: alpine:3.19 # Ein leichtes, natives Image
+  script:
+    - echo "Starte Rätsel-Test für riddle-01..."
+    - chmod +x solve.sh
+    - ./solve.sh | grep "OK"
+    - echo "Test erfolgreich bestanden!"
+  tags:
+    - local # Stellt sicher, dass Ihr Runner den Job annimmt
+
+
+  # Optional: Wenn der Test bestanden ist, soll der nächste Job starten
+  # (Dieser Job wird später durch den "Unlock next riddle" API-Call ersetzt)
+  # when: on_success

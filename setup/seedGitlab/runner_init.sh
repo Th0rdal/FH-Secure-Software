@@ -31,8 +31,9 @@ else
     --description "${RUNNER_DESCRIPTION}" \
     --tag-list "${RUNNER_TAG_LIST}" \
     --run-untagged="${RUNNER_RUN_UNTAGGED}" \
-    --locked="${RUNNER_LOCKED}"
-    
+    --locked="${RUNNER_LOCKED}" \
+    --docker-network-mode "setup_backend"
+
   echo "Runner erfolgreich registriert."
   
 fi # Fehler 2 (Logik): Das 'fi' muss hier stehen, um den Registrierungsblock korrekt abzuschließen

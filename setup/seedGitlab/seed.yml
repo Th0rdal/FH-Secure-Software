@@ -76,6 +76,47 @@
         initialize_with_readme: true
       loop: "{{ puzzle_projects }}"
 
+    # !! muss man beim intiale setup machen weil url vl erst später erreichbar ist auch wenn container gitlab healthy
+    # Fügen Sie DIESEN TASK VOR dem Klon-Task ein:
+    - name: Wait 30 seconds for GitLab Git services to stabilize
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Clone riddle-01 repository locally in Ansible container
+      ansible.builtin.git:
+        # Authentifizierung als root (mit dem neuen Passwort) über HTTP
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[0].path }}.git"
+        dest: "/tmp/riddle-01-repo" # Temporärer Klon-Pfad im Container
+        version: "main"
+        force: true
+      # Benötigt python-gitlab nicht, verwendet das git-Binary
+
+    - name: Copy initial files into cloned repository
+      ansible.builtin.copy:
+        # Pfad im Ansible-Container, wo Ihre Dateien liegen
+        src: "/work/riddle-01-files/{{ item }}"
+        dest: "/tmp/riddle-01-repo/{{ item }}"
+        mode: "0755" # Setzt Ausführungsberechtigung für solve.sh
+      loop:
+        - .gitlab-ci.yml
+        - solve.sh
+
+    - name: Commit and push initial files to GitLab
+      ansible.builtin.shell:
+        cmd: |
+          # Gehe in das geklonte Repo
+          cd /tmp/riddle-01-repo
+          # Globale Git-Config setzen (nur für diesen Commit)
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial riddle setup and CI pipeline."
+          git push origin main
+        executable: /bin/sh
+      register: git_output
+      # Markiert den Task als 'changed', wenn etwas gepusht wurde
+      changed_when: "'Everything up-to-date' not in git_output.stdout"
+
     - name: Grant 'riddle' Developer access to the first puzzle (riddle-01-start)
       community.general.gitlab_project_members:
         api_url: "{{ gitlab_base_url }}"

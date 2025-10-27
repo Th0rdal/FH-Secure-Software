@@ -64,6 +64,34 @@
       ansible.builtin.set_fact:
         riddle_user_id: "{{ riddle_user_details.user.id }}"
 
+    # ######################################
+    # NEU: 2.1 ADMIN PAT ERSTELLEN
+    # ######################################
+    - name: Create Admin Personal Access Token (PAT) via Rails Runner
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        # Docker Host explizit setzen, um http+docker Fehler zu vermeiden
+        docker_host: "unix:///var/run/docker.sock"
+        # Dieser Rails-Befehl findet den root-User und erstellt einen PAT mit API-Scope
+        command: >-
+          gitlab-rails runner "user = User.find_by_username('root');
+          token = user.personal_access_tokens.create(
+            scopes: ['api'],
+            name: 'ci_unlock_pat',
+            expires_at: 365.days.from_now
+          );
+          puts token.token"
+      register: admin_pat_raw
+      changed_when: admin_pat_raw.stdout is defined and admin_pat_raw.stdout != ""
+
+    - name: Extract Admin PAT value
+      ansible.builtin.set_fact:
+        # Trim entfernt eventuelle Leerzeilen
+        gitlab_admin_pat: "{{ admin_pat_raw.stdout | trim }}"
+
+    # ######################################
+    # NEU: 2.2 ADMIN PAT ALS CI/CD VARIABLE SPEICHERN
+    # ######################################
     - name: Create all puzzle repositories
       community.general.gitlab_project:
         api_url: "{{ gitlab_base_url }}"
@@ -76,12 +104,38 @@
         initialize_with_readme: true
       loop: "{{ puzzle_projects }}"
 
+    - name: Set CI/CD variable GITLAB_ADMIN_TOKEN (required for unlock)
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        project: "root/{{ puzzle_projects[0].path }}"
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN"
+            value: "{{ gitlab_admin_pat }}"
+            protected: true
+            masked: true
+        state: present
+
+    - name: Set CI/CD variables required for unlocking next riddle
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        project: "root/{{ puzzle_projects[0].path }}" # Im ersten Rätsel speichern
+        variables:
+          - name: "RIDDLE_USER_ID"
+            value: "{{ riddle_user_id }}"
+            protected: true
+          - name: "NEXT_RIDDLE_PATH"
+            value: "{{ puzzle_projects[1].path }}"
+            protected: true
+
     # !! muss man beim intiale setup machen weil url vl erst später erreichbar ist auch wenn container gitlab healthy
     # Fügen Sie DIESEN TASK VOR dem Klon-Task ein:
-    - name: Wait 30 seconds for GitLab Git services to stabilize
-      ansible.builtin.pause:
-        seconds: 30
-
+    # - name: Wait 30 seconds for GitLab Git services to stabilize
+    #   ansible.builtin.pause:
+    #     seconds: 30
     - name: Clone riddle-01 repository locally in Ansible container
       ansible.builtin.git:
         # Authentifizierung als root (mit dem neuen Passwort) über HTTP
@@ -141,16 +195,6 @@
       register: runner_token_raw
       changed_when: false
 
-    # --- (Der Rest deines Playbooks bleibt gleich) ---
-    - name: Extract runner token
-      ansible.builtin.set_fact:
-        runner_token: "{{ runner_token_raw.stdout | trim }}"
-
-    - name: Show new runner token
-      ansible.builtin.debug:
-        var: runner_token
-        verbosity: 1
-
     # --- NEUER TASK 2: Token extrahieren ---
     - name: Extract runner token
       ansible.builtin.set_fact:
@@ -170,7 +214,7 @@
         mode: "0755" # Setzt die Ausführungsberechtigung (+x) für den Besitzer und die Gruppe
 
     # --- NEUER TASK 3: config.toml Datei schreiben ---
-    - name: Create explicit config.toml for gitlab-runner
+    - name: Write runner.env file for gitlab-runner service
       ansible.builtin.copy:
         # /project/ ist der Mount-Punkt für dein '.'-Verzeichnis auf dem Host
         dest: "{{ runner_env_path }}"

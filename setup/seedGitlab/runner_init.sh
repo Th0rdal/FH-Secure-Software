@@ -2,7 +2,11 @@
 
 set -e
 
+. /seedGitlab/runner.env
+
+
 echo "--- Runner Init Skript gestartet ---"
+
 
 # 1. Prüfen, ob die Konfiguration existiert
 if [ -f /etc/gitlab-runner/config.toml ]; then

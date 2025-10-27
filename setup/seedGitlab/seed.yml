@@ -20,7 +20,7 @@
       - name: "riddle-03-deploy"
         path: "riddle-03"
     # Zielpfad für die .env-Datei. '/project' ist dein '.'-Verzeichnis.
-    runner_env_path: "/project/runner.env"
+    runner_env_path: "/project/seedGitlab/runner.env"
     compose_chdir: "/project"
 
   tasks:
@@ -132,7 +132,7 @@
     - name: Create explicit config.toml for gitlab-runner
       ansible.builtin.copy:
         # /project/ ist der Mount-Punkt für dein '.'-Verzeichnis auf dem Host
-        dest: "/project/runner.env"
+        dest: "{{ runner_env_path }}"
         mode: "0644"
         # Dies ist eine minimale, funktionierende config.toml
         content: |

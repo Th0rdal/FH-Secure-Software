@@ -1,6 +1,6 @@
 services:
   gitlab:
-    image: gitlab/gitlab-ce:17.8.1-ce.0
+    image: gitlab/gitlab-ce:18.5.1-ce.0
     container_name: gitlab
     restart: always
     ports:
@@ -16,6 +16,7 @@ services:
       GITLAB_OMNIBUS_CONFIG: |
         letsencrypt['enable'] = false
         gitlab_rails['initial_root_password_expiration'] = false
+        gitlab_rails['allow_runner_registration_token'] = true
     networks:
       public: {}
       backend: {}
@@ -31,15 +32,15 @@ services:
       start_period: 90s
 
   gitlab-runner:
-    image: gitlab/gitlab-runner:alpine
+    image: gitlab/gitlab-runner:alpine3.19
     container_name: gitlab-runner
     restart: always
     depends_on:
       ansible:
         condition: service_completed_successfully
 
-    env_file:
-      - ./runner.env
+    # env_file:
+    #   - ./runner.env
 
     volumes:
       # Volume für config.toml beibehalten

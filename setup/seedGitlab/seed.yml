@@ -171,6 +171,19 @@
       # Markiert den Task als 'changed', wenn etwas gepusht wurde
       changed_when: "'Everything up-to-date' not in git_output.stdout"
 
+    - name: Unprotect 'main' branch for Developer push access on ALL puzzles
+      community.general.gitlab_protected_branch:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        project: "root/{{ item.path }}"
+        name: "main"
+        state: present
+        push_access_level: developer # Erlaubt Developern das Pushen
+        merge_access_levels: developer # Erlaubt Developern das Mergen
+
+      loop: "{{ puzzle_projects }}"
+
     - name: Grant 'riddle' Developer access to the first puzzle (riddle-01-start)
       community.general.gitlab_project_members:
         api_url: "{{ gitlab_base_url }}"

@@ -64,6 +64,62 @@
       ansible.builtin.set_fact:
         riddle_user_id: "{{ riddle_user_details.user.id }}"
 
+    - name: Create secure CI template repository
+      community.general.gitlab_project:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        name: "Admin CI Templates"
+        path: "admin-ci-templates"
+        state: "present"
+        visibility: "private" # WICHTIG: Nur Admins sehen es
+        initialize_with_readme: true
+      register: ci_template_repo_details
+
+    - name: Extract Admin CI Template Project ID
+      ansible.builtin.set_fact:
+        admin_ci_template_project_id: "{{ ci_template_repo_details.project.id }}"
+
+    - name: Clone secure CI template repository locally
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/admin-ci-templates.git"
+        dest: "/tmp/admin-ci-repo" # Temporärer Klon-Pfad
+        version: "main"
+        force: true
+
+    - name: Set ADMIN_CI_PROJECT_ID in riddle-01 repo
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_username: "root"
+        api_password: "{{ new_gitlab_root_password }}"
+        project: "root/{{ puzzle_projects[0].path }}"
+        variables:
+          - name: "ADMIN_CI_PROJECT_ID"
+            value: "{{ admin_ci_template_project_id }}"
+            protected: false
+            masked: false
+        state: present
+
+    - name: Copy CI template file into cloned repository
+      ansible.builtin.copy:
+        # Pfad im Ansible-Container zur *vollen* CI-Logik
+        src: "/work/riddle_ci.yml"
+        dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
+        mode: "0644"
+
+    - name: Commit and push CI template file to GitLab
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/admin-ci-repo
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial riddle test and unlock logic"
+          git push origin main
+        executable: /bin/sh
+      register: git_ci_output
+      changed_when: "'Everything up-to-date' not in git_ci_output.stdout"
+
     # ######################################
     # NEU: 2.1 ADMIN PAT ERSTELLEN
     # ######################################
@@ -89,6 +145,11 @@
         # Trim entfernt eventuelle Leerzeilen
         gitlab_admin_pat: "{{ admin_pat_raw.stdout | trim }}"
 
+    # NEUER DEBUG-TASK:
+    - name: DEBUG Show extracted PAT
+      ansible.builtin.debug:
+        msg: "Der extrahierte PAT ist '{{ gitlab_admin_pat }}' (Länge: {{ gitlab_admin_pat | length }})"
+
     # ######################################
     # NEU: 2.2 ADMIN PAT ALS CI/CD VARIABLE SPEICHERN
     # ######################################
@@ -104,33 +165,39 @@
         initialize_with_readme: true
       loop: "{{ puzzle_projects }}"
 
-    - name: Set CI/CD variable GITLAB_ADMIN_TOKEN (required for unlock)
+    - name: Set GITLAB_ADMIN_TOKEN in all puzzle repos
       community.general.gitlab_project_variable:
         api_url: "{{ gitlab_base_url }}"
         api_username: "root"
         api_password: "{{ new_gitlab_root_password }}"
-        project: "root/{{ puzzle_projects[0].path }}"
-        variables:
-          - name: "GITLAB_ADMIN_TOKEN"
-            value: "{{ gitlab_admin_pat }}"
-            protected: true
-            masked: true
+        project: "root/{{ item.path }}" # Gilt für riddle-01, -02, -03
         state: present
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN" # Wird für den Trigger-API-Aufruf benötigt
+            value: "{{ gitlab_admin_pat }}"
+            protected: false
+            masked: false
+      loop: "{{ puzzle_projects }}"
 
-    - name: Set CI/CD variables required for unlocking next riddle
+    - name: Set CI/CD variables in Admin Repo (for unlock logic)
       community.general.gitlab_project_variable:
         api_url: "{{ gitlab_base_url }}"
         api_username: "root"
         api_password: "{{ new_gitlab_root_password }}"
-        project: "root/{{ puzzle_projects[0].path }}" # Im ersten Rätsel speichern
+        project: "root/admin-ci-templates" # Gilt für das Admin-Repo
+        state: present
         variables:
-          - name: "RIDDLE_USER_ID"
+          - name: "GITLAB_ADMIN_TOKEN" # Wird für das Klonen & Freischalten benötigt
+            value: "{{ gitlab_admin_pat }}"
+            protected: false
+            masked: false
+          - name: "RIDDLE_USER_ID" # ID des 'riddle' Users
             value: "{{ riddle_user_id }}"
-            protected: true
-          - name: "NEXT_RIDDLE_PATH"
-            value: "{{ puzzle_projects[1].path }}"
-            protected: true
+            protected: false
 
+    # ######################################
+    # 3. CI-VARIABLEN IN BEIDEN REPOS SETZEN
+    # ######################################
     # !! muss man beim intiale setup machen weil url vl erst später erreichbar ist auch wenn container gitlab healthy
     # Fügen Sie DIESEN TASK VOR dem Klon-Task ein:
     # - name: Wait 30 seconds for GitLab Git services to stabilize

@@ -1,0 +1,47 @@
+stages:
+  - test
+  - unlock
+
+run_riddle_test:
+  stage: test
+  image: alpine:3.19
+  variables:
+    # Wir deaktivieren die Standard-Git-Strategie, um manuell zu klonen
+    GIT_STRATEGY: none
+  before_script:
+    - apk update && apk add git
+    # Klonen des User-Repos mit dem Admin-Token
+    # RIDDLE_PROJECT_PATH wird vom Trigger übergeben (z.B. "root/riddle-01")
+    - git clone "http://oauth2:${GITLAB_ADMIN_TOKEN}@gitlab/${RIDDLE_PROJECT_PATH}.git" .
+    # Auschecken des genauen Commits, den der User gepusht hat
+    - git checkout "${RIDDLE_COMMIT_SHA}"
+  script:
+    # Der eigentliche Test
+    - echo "Starte Rätsel-Test für ${RIDDLE_PROJECT_PATH}..."
+    - /bin/sh solve.sh | grep "OK"
+    - echo "Test erfolgreich bestanden!"
+  tags:
+    - local
+
+unlock_next_riddle:
+  stage: unlock
+  image: alpine:3.19
+  variables:
+    DEVELOPER_ACCESS: 30
+  when: on_success
+  before_script:
+    - apk update && apk add curl jq
+  script:
+    # Dieses Skript verwendet jetzt die Variablen, die
+    # 1. Global im Admin-Repo gesetzt sind (GITLAB_ADMIN_TOKEN, RIDDLE_USER_ID)
+    # 2. Vom Trigger übergeben wurden (NEXT_RIDDLE_PATH)
+    - echo "Starte Freischaltung von ${NEXT_RIDDLE_PATH} für User ${RIDDLE_USER_ID}..."
+    - |
+      API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
+        --request POST "${CI_SERVER_URL}/api/v4/projects/root%2F${NEXT_RIDDLE_PATH}/members" \
+        --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data "{\"user_id\": ${RIDDLE_USER_ID}, \"access_level\": ${DEVELOPER_ACCESS}}")
+    # ... (Restliche Fehlerbehandlung wie zuvor) ...
+  tags:
+    - local

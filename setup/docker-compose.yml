@@ -5,7 +5,6 @@ services:
     restart: always
     ports:
       - "80:80"
-      - "443:443"
       - "2222:22"
     #volumes:
     #- config:/etc/gitlab
@@ -14,9 +13,13 @@ services:
     environment:
       GITLAB_ROOT_PASSWORD: "2ada54772a7b!"
       GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
         letsencrypt['enable'] = false
         gitlab_rails['initial_root_password_expiration'] = false
         gitlab_rails['allow_runner_registration_token'] = true
+
+        nginx['listen_port']  = 80
+        nginx['listen_https'] = false
     networks:
       public: {}
       backend: {}

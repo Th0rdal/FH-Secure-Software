@@ -24,13 +24,15 @@ trigger_riddle_tester:
 
       echo "Token-Länge (sollte > 0 sein): $(echo -n ${GITLAB_ADMIN_TOKEN} | wc -c)"
       echo "Token-Wert (zur Kontrolle): '${GITLAB_ADMIN_TOKEN}'"
+      echo "ADMIN_CI_PROJECT_ID Variablen check"
+      echo "${ADMIN_CI_PROJECT_ID}"
       echo "--- END DEBUGGING ---"
 
       # Der eigentliche API-Aufruf:
       # 1. Verwendung der Projekt-ID ${ADMIN_CI_PROJECT_ID} (statt root%2F...)
       # 2. Token in einfachen Anführungszeichen (PRIVATE-TOKEN: '...')
 
-      ADMIN_ID="${ADMIN_CI_PROJECT_ID}"
+
 
       API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
         --request POST \
@@ -39,7 +41,7 @@ trigger_riddle_tester:
         --form "variables[RIDDLE_PROJECT_PATH]=${CI_PROJECT_PATH}" \
         --form "variables[RIDDLE_COMMIT_SHA]=${CI_COMMIT_SHA}" \
         --form "variables[NEXT_RIDDLE_PATH]=riddle-02" \
-        "${CI_SERVER_URL}/api/v4/projects/${ADMIN_ID}/trigger/pipeline") # <-- HIER IST DIE PROJEKT-ID KORREKTUR
+        "${CI_SERVER_URL}/api/v4/projects/${ADMIN_CI_PROJECT_ID}/trigger/pipeline"
 
       echo "Trigger request sent."
       echo "API Response: ${API_RESPONSE}" # Nützlich zum Debuggen

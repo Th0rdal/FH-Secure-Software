@@ -1,0 +1,15 @@
+[package]
+name = "challenge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bcrypt = "0.15"
+
+[lib]
+name = "challenge_lib"
+path = "lib.rs"
+
+[[test]]
+name = "challenge_test"
+path = "challenge_test.rs"

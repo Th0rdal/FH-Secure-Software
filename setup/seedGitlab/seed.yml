@@ -24,7 +24,16 @@
     compose_chdir: "/project"
 
   tasks:
-    # --- Dein bestehender Task zum Ändern des Passworts ---
+    - name: Wait for Gitlab container to be in running state
+      community.docker.docker_container_info:
+        name: gitlab
+      register: gitlab_container_info
+      retries: 20
+      delay: 60
+      until: gitlab_container_info.container.State.Health.Status == "healthy"
+      changed_when: false
+
+      # --- Dein bestehender Task zum Ändern des Passworts ---
     - name: Change root password via rails runner (through Docker API)
       community.docker.docker_container_exec:
         container: "{{ gitlab_container_name }}"
@@ -48,9 +57,19 @@
     # ######################################
     # 2. PUZZLE SETUP (USER AND PROJECTS)
     # ######################################
+    - name: 01. Check GitLab API Connectivity and Version (HTTP)
+      ansible.builtin.uri:
+        url: "http://gitlab/api/v4/projects" # Changed to http
+        method: GET
+        validate_certs: false                        # Explicitly set to false
+        status_code: 200
+      register: gitlab_api_check
+      changed_when: false
+      ignore_errors: true
+
     - name: Create 'riddle' user
       community.general.gitlab_user:
-        api_url: "{{ gitlab_base_url }}"
+        api_url: "{{ gitlab_base_url }}/api/v4/users"
         api_username: "root"
         api_password: "{{ new_gitlab_root_password }}"
         name: "User Riddle"

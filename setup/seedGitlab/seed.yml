@@ -6,7 +6,7 @@
 
   vars:
     new_gitlab_root_password: "2ada54772a7bb!"
-    gitlab_base_url: "http://gitlab" # interne URL
+    gitlab_base_url: "http://localhost" # interne URL
     gitlab_container_name: "gitlab"
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
     riddle_username: "riddle"
@@ -59,7 +59,7 @@
     # ######################################
     - name: 01. Check GitLab API Connectivity and Version (HTTP)
       ansible.builtin.uri:
-        url: "http://gitlab/api/v4/projects" # Changed to http
+        url: "http://localhost/api/v4/projects" # Changed to http
         method: GET
         validate_certs: false                        # Explicitly set to false
         status_code: 200

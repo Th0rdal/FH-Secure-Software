@@ -1,69 +1,95 @@
 services:
   gitlab:
-    image: gitlab/gitlab-ce:18.5.1-ce.0
+    image: gitlab/gitlab-ce:17.6.1-ce.0
     container_name: gitlab
     restart: always
     ports:
       - "80:80"
       - "2222:22"
-    #volumes:
-    #- config:/etc/gitlab
-    #- logs:/var/log/gitlab
-    #- data:/var/opt/gitlab
     environment:
       GITLAB_ROOT_PASSWORD: "2ada54772a7b!"
       GITLAB_OMNIBUS_CONFIG: |
         letsencrypt['enable'] = false
         gitlab_rails['initial_root_password_expiration'] = false
-        gitlab_rails['allow_runner_registration_token'] = true
-
         nginx['listen_port']  = 80
         nginx['listen_https'] = false
-        external_url 'http://localhost'
+        external_url 'http://gitlab'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
     networks:
       public: {}
       backend: {}
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS http://localhost/-/readiness >/dev/null || exit 1",
-        ]
+      test: ["CMD-SHELL", "curl -fsS http://localhost/-/readiness >/dev/null || exit 1"]
       interval: 10s
       timeout: 30s
-      retries: 40
+      retries: 60
       start_period: 90s
 
   gitlab-runner:
-    image: gitlab/gitlab-runner:alpine3.19
+    image: gitlab/gitlab-runner:alpine-v17.6.0
     container_name: gitlab-runner
     restart: always
     depends_on:
       ansible:
         condition: service_completed_successfully
-
-    # env_file:
-    #   - ./runner.env
-
     volumes:
-      # Volume für config.toml beibehalten
       - runner-config:/etc/gitlab-runner
-      # Mounten Sie den seedGitlab Ordner in den Runner-Container
       - ./seedGitlab:/seedGitlab
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       backend: {}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        TOKEN_FILE=/seedGitlab/runner_token
+        CONFIG_FILE=/etc/gitlab-runner/config.toml
+        
+        echo "------------------------------------------------"
+        echo "Runner: Started after Ansible completion."
+        
+        if [ ! -f "$$TOKEN_FILE" ]; then
+           echo "ERROR: Ansible finished but no token file found!"
+           exit 1
+        fi
 
-    # NEU: Entfernen Sie den entrypoint: und verwenden Sie nur command:
-    # Führen Sie das Skript direkt aus.
-    entrypoint: /seedGitlab/runner_init.sh
+        RUNNER_TOKEN=$$(cat "$$TOKEN_FILE")
+        echo "Runner: Token loaded. Configuring..."
+        
+        mkdir -p /etc/gitlab-runner
+        cat > $$CONFIG_FILE <<EOF
+        concurrent = 1
+        check_interval = 0
+        [[runners]]
+          name = "Ansible Docker Runner"
+          url = "http://gitlab"
+          token = "$$RUNNER_TOKEN"
+          executor = "docker"
+          [runners.custom_build_dir]
+          [runners.cache]
+            MaxUploadedArchiveSize = 0
+          [runners.docker]
+            tls_verify = false
+            image = "alpine:latest"
+            privileged = true
+            disable_entrypoint_overwrite = false
+            oom_kill_disable = true
+            disable_cache = false
+            volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+            shm_size = 0
+            network_mode = "backend"
+            pull_policy = "if-not-present"
+        EOF
+        
+        echo "Runner: Configuration written. Starting daemon..."
+        exec /usr/bin/gitlab-runner run
 
   ansible:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        COLL_VER: "3.10.0" # Dieses Argument wird an dein Dockerfile übergeben
+        COLL_VER: "3.10.0"
     container_name: ansible
     working_dir: /work
     volumes:
@@ -72,12 +98,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       GITLAB_URL: http://gitlab
-
-    # DIESE ZEILE ERSETZT DEIN GESAMTES ENTRYSCRIPT:
-    # Es führt das Playbook direkt aus, nachdem der Container
-    # (mit allen Installationen aus dem Dockerfile) gestartet wurde.
     command: ["ansible-playbook", "/work/seed.yml"]
-
     networks:
       public: {}
       backend: {}
@@ -87,11 +108,11 @@ services:
 
 volumes:
   runner-config: {}
-#  config:
-#  logs:
-#  data:
 
 networks:
   public:
     driver: bridge
   backend:
+    driver: bridge
+    # THIS IS THE FIX: Explicitly name the network so the Runner can find it
+    name: backend

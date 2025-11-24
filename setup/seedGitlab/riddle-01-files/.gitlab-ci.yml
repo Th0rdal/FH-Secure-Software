@@ -16,10 +16,10 @@ trigger_riddle_tester:
       # --- DEBUGGING TOKEN ---
       echo "Prüfe Token-Status..."
       # Die gesamte Logik innerhalb des 'pipe' Blocks
-      if [ -z "${GITLAB_ADMIN_TOKEN}" ]; then 
-        echo "FEHLER: Token ist LEER!"; 
-      else 
-        echo "Token ist vorhanden."; 
+      if [ -z "${GITLAB_ADMIN_TOKEN}" ]; then
+        echo "FEHLER: Token ist LEER!";
+      else
+        echo "Token ist vorhanden.";
       fi
 
       echo "Token-Länge (sollte > 0 sein): $(echo -n ${GITLAB_ADMIN_TOKEN} | wc -c)"
@@ -32,7 +32,8 @@ trigger_riddle_tester:
       # 1. Verwendung der Projekt-ID ${ADMIN_CI_PROJECT_ID} (statt root%2F...)
       # 2. Token in einfachen Anführungszeichen (PRIVATE-TOKEN: '...')
 
-
+      echo "Debug: Length of Token is ${#GITLAB_ADMIN_TOKEN}"
+      # ... your curl command
 
       API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
         --request POST \
@@ -41,10 +42,28 @@ trigger_riddle_tester:
         --form "variables[RIDDLE_PROJECT_PATH]=${CI_PROJECT_PATH}" \
         --form "variables[RIDDLE_COMMIT_SHA]=${CI_COMMIT_SHA}" \
         --form "variables[NEXT_RIDDLE_PATH]=riddle-02" \
-        "${CI_SERVER_URL}/api/v4/projects/${ADMIN_CI_PROJECT_ID}/trigger/pipeline"
+        "${CI_SERVER_URL}/api/v4/projects/${ADMIN_CI_PROJECT_ID}/trigger/pipeline")
 
-      echo "Trigger request sent."
-      echo "API Response: ${API_RESPONSE}" # Nützlich zum Debuggen
+      # We use the standard /pipeline endpoint because we are using a User PAT (PRIVATE-TOKEN),
+      # not a Project Trigger Token.
+      API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
+        --request POST \
+        --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data "{ \"ref\": \"main\", \"variables\": [ {\"key\": \"RIDDLE_PROJECT_PATH\", \"value\": \"${CI_PROJECT_PATH}\"}, {\"key\": \"RIDDLE_COMMIT_SHA\", \"value\": \"${CI_COMMIT_SHA}\"}, {\"key\": \"NEXT_RIDDLE_PATH\", \"value\": \"riddle-02\"} ] }" \
+        "${CI_SERVER_URL}/api/v4/projects/${ADMIN_CI_PROJECT_ID}/pipeline")
+
+      # Parse response
+      HTTP_BODY=$(echo "$API_RESPONSE" | sed '$d')
+      HTTP_STATUS=$(echo "$API_RESPONSE" | tail -n1 | sed 's/HTTP_STATUS://')
+
+      if [ "$HTTP_STATUS" -ne 201 ]; then
+        echo "Error creating pipeline. Status: $HTTP_STATUS"
+        echo "Response: $HTTP_BODY"
+        exit 1
+      else
+        echo "Pipeline created successfully!"
+      fi
 
   tags:
     - local

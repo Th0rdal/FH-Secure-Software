@@ -1,12 +1,11 @@
----
 - name: Bootstrap GitLab & Shared Runner
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
-    new_gitlab_root_password: "2ada54772a7bb!"
-    gitlab_base_url: "http://localhost" # interne URL
+    new_gitlab_root_password: "2ada54772a7b!"
+    gitlab_base_url: "http://gitlab"
     gitlab_container_name: "gitlab"
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
     riddle_username: "riddle"
@@ -19,98 +18,149 @@
         path: "riddle-02"
       - name: "riddle-03-deploy"
         path: "riddle-03"
-    # Zielpfad für die .env-Datei. '/project' ist dein '.'-Verzeichnis.
-    runner_env_path: "/project/seedGitlab/runner.env"
-    compose_chdir: "/project"
+    runner_token_path: "/project/seedGitlab/runner_token"
 
   tasks:
-    - name: Wait for Gitlab container to be in running state
-      community.docker.docker_container_info:
-        name: gitlab
-      register: gitlab_container_info
-      retries: 20
-      delay: 60
-      until: gitlab_container_info.container.State.Health.Status == "healthy"
-      changed_when: false
+    # ---------------------------------------------------------
+    # 0. CLEANUP
+    # ---------------------------------------------------------
+    - name: Remove stale runner token file
+      ansible.builtin.file:
+        path: "{{ runner_token_path }}"
+        state: absent
 
-      # --- Dein bestehender Task zum Ändern des Passworts ---
-    - name: Change root password via rails runner (through Docker API)
+    # ---------------------------------------------------------
+    # 1. INITIAL WAIT & AUTH
+    # ---------------------------------------------------------
+    - name: Wait for GitLab API to be ready (Anti-502)
+      ansible.builtin.uri:
+        url: "{{ gitlab_base_url }}/api/v4/version"
+        method: GET
+        validate_certs: false
+        status_code: [200, 401]
+      register: api_check
+      until: api_check.status in [200, 401]
+      retries: 100
+      delay: 5
+
+    - name: Change root password via rails runner
       community.docker.docker_container_exec:
         container: "{{ gitlab_container_name }}"
         env:
           NEWPW: "{{ new_gitlab_root_password }}"
         command: >-
-          gitlab-rails runner "u = User.find_by_username('root'); u.password = ENV['NEWPW'];
-          u.password_confirmation = ENV['NEWPW']; u.save!; puts 'OK'"
+          gitlab-rails runner "u = User.find_by_username('root'); 
+          u.password = ENV['NEWPW'];
+          u.password_confirmation = ENV['NEWPW']; 
+          u.save!; puts 'OK'"
       register: exec_out
+      changed_when: "'OK' in (exec_out.stdout | default(''))"
+      retries: 5
+      delay: 5
+      until: exec_out.rc == 0
 
-    - name: Mark changed only when OK appears
+    - name: Create Admin Personal Access Token (PAT)
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        command: >-
+          gitlab-rails runner "
+          user = User.find_by_username('root');
+          token = user.personal_access_tokens.create(
+            scopes: ['api'], 
+            name: 'ansible_pat', 
+            expires_at: 365.days.from_now
+          );
+          puts token.token"
+      register: admin_pat_raw
+      changed_when: admin_pat_raw.stdout | length > 20
+      retries: 5
+      delay: 5
+      until: admin_pat_raw.rc == 0
+
+    - name: Extract Admin PAT
       ansible.builtin.set_fact:
-        _changed: "{{ 'OK' in (exec_out.stdout | default('')) }}"
-      changed_when: _changed
-      failed_when: exec_out.rc|default(0) != 0 or not _changed
+        gitlab_admin_pat: "{{ admin_pat_raw.stdout | trim }}"
 
-    - name: Show rails-runner output
-      ansible.builtin.debug:
-        var: exec_out
-
-    # ######################################
-    # 2. PUZZLE SETUP (USER AND PROJECTS)
-    # ######################################
-    - name: 01. Check GitLab API Connectivity and Version (HTTP)
-      ansible.builtin.uri:
-        url: "http://localhost/api/v4/projects" # Changed to http
-        method: GET
-        validate_certs: false                        # Explicitly set to false
-        status_code: 200
-      register: gitlab_api_check
-      changed_when: false
-      ignore_errors: true
-
-    - name: Create 'riddle' user
+    # ---------------------------------------------------------
+    # 2. CREATE RESOURCES
+    # ---------------------------------------------------------
+    - name: Add Riddle User
       community.general.gitlab_user:
-        api_url: "{{ gitlab_base_url }}/api/v4/users"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
-        name: "User Riddle"
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        name: "Riddle User"
         username: "{{ riddle_username }}"
-        email: "{{ riddle_email }}"
         password: "{{ riddle_user_password }}"
-        state: "present"
+        email: "{{ riddle_email }}"
+        confirm: no
+        state: present
+        validate_certs: no
       register: riddle_user_details
+      until: riddle_user_details is success
+      retries: 20
+      delay: 5
 
-    - name: Extract riddle user ID for later use in CI/CD
+    - name: Extract riddle user ID
       ansible.builtin.set_fact:
         riddle_user_id: "{{ riddle_user_details.user.id }}"
 
-    - name: Create secure CI template repository
+    - name: Create 'Admin CI Templates' repository
       community.general.gitlab_project:
         api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
+        api_token: "{{ gitlab_admin_pat }}"
         name: "Admin CI Templates"
         path: "admin-ci-templates"
-        state: "present"
-        visibility: "private" # WICHTIG: Nur Admins sehen es
+        visibility: "private"
         initialize_with_readme: true
+        validate_certs: no
       register: ci_template_repo_details
+      until: ci_template_repo_details is success
+      retries: 20
+      delay: 5
 
     - name: Extract Admin CI Template Project ID
       ansible.builtin.set_fact:
         admin_ci_template_project_id: "{{ ci_template_repo_details.project.id }}"
 
-    - name: Clone secure CI template repository locally
-      ansible.builtin.git:
-        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/admin-ci-templates.git"
-        dest: "/tmp/admin-ci-repo" # Temporärer Klon-Pfad
-        version: "main"
-        force: true
+    - name: Create all puzzle repositories
+      community.general.gitlab_project:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        name: "{{ item.name }}"
+        path: "{{ item.path }}"
+        state: "present"
+        visibility: "private"
+        initialize_with_readme: true
+        validate_certs: no
+      loop: "{{ puzzle_projects }}"
+      register: project_creation
+      until: project_creation is success
+      retries: 20
+      delay: 5
 
-    - name: Set ADMIN_CI_PROJECT_ID in riddle-01 repo
+    # ---------------------------------------------------------
+    # 3. VERIFICATION & STABILIZATION
+    # ---------------------------------------------------------
+    - name: Verify riddle-01 project exists in API
+      ansible.builtin.uri:
+        url: "{{ gitlab_base_url }}/api/v4/projects/root%2F{{ puzzle_projects[0].path }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_admin_pat }}"
+        validate_certs: false
+        status_code: 200
+      register: project_ready_check
+      until: project_ready_check.status == 200
+      retries: 40
+      delay: 5
+
+    # ---------------------------------------------------------
+    # 4. CONFIGURE CI VARIABLES
+    # ---------------------------------------------------------
+    - name: Set ADMIN_CI_PROJECT_ID variable in riddle-01
       community.general.gitlab_project_variable:
         api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
+        api_token: "{{ gitlab_admin_pat }}"
         project: "root/{{ puzzle_projects[0].path }}"
         variables:
           - name: "ADMIN_CI_PROJECT_ID"
@@ -118,223 +168,188 @@
             protected: false
             masked: false
         state: present
+      register: set_var_result
+      until: set_var_result is success
+      retries: 20
+      delay: 3
 
-    - name: Copy CI template file into cloned repository
+    - name: Set GITLAB_ADMIN_TOKEN in all puzzle repos
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/{{ item.path }}"
+        state: present
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN"
+            value: "{{ gitlab_admin_pat }}"
+            protected: false
+            masked: false
+      loop: "{{ puzzle_projects }}"
+      register: var_set_retry
+      until: var_set_retry is success
+      retries: 20
+      delay: 3
+
+    - name: Set variables in Admin Template Repo
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/admin-ci-templates"
+        state: present
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN"
+            value: "{{ gitlab_admin_pat }}"
+          - name: "RIDDLE_USER_ID"
+            value: "{{ riddle_user_id }}"
+      register: admin_var_retry
+      until: admin_var_retry is success
+      retries: 20
+      delay: 3
+
+    # ---------------------------------------------------------
+    # 5. PUSH FILE CONTENT
+    # ---------------------------------------------------------
+    - name: Clone secure CI template repository locally
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/admin-ci-templates.git"
+        dest: "/tmp/admin-ci-repo"
+        version: "main"
+        force: true
+      register: clone_result
+      until: clone_result is success
+      retries: 20
+      delay: 5
+
+    - name: Copy CI template file
       ansible.builtin.copy:
-        # Pfad im Ansible-Container zur *vollen* CI-Logik
         src: "/work/riddle_ci.yml"
         dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
         mode: "0644"
 
-    - name: Commit and push CI template file to GitLab
+    - name: Commit and push CI template
       ansible.builtin.shell:
         cmd: |
           cd /tmp/admin-ci-repo
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"
           git add .
-          git commit -m "Initial riddle test and unlock logic"
+          git commit -m "Initial riddle test logic" || echo "No changes"
           git push origin main
         executable: /bin/sh
-      register: git_ci_output
-      changed_when: "'Everything up-to-date' not in git_ci_output.stdout"
+      register: git_push_output
+      until: git_push_output.rc == 0
+      retries: 20
+      delay: 5
 
-    # ######################################
-    # NEU: 2.1 ADMIN PAT ERSTELLEN
-    # ######################################
-    - name: Create Admin Personal Access Token (PAT) via Rails Runner
-      community.docker.docker_container_exec:
-        container: "{{ gitlab_container_name }}"
-        # Docker Host explizit setzen, um http+docker Fehler zu vermeiden
-        docker_host: "unix:///var/run/docker.sock"
-        # Dieser Rails-Befehl findet den root-User und erstellt einen PAT mit API-Scope
-        command: >-
-          gitlab-rails runner "user = User.find_by_username('root');
-          token = user.personal_access_tokens.create(
-            scopes: ['api'],
-            name: 'ci_unlock_pat',
-            expires_at: 365.days.from_now
-          );
-          puts token.token"
-      register: admin_pat_raw
-      changed_when: admin_pat_raw.stdout is defined and admin_pat_raw.stdout != ""
-
-    - name: Extract Admin PAT value
-      ansible.builtin.set_fact:
-        # Trim entfernt eventuelle Leerzeilen
-        gitlab_admin_pat: "{{ admin_pat_raw.stdout | trim }}"
-
-    # NEUER DEBUG-TASK:
-    - name: DEBUG Show extracted PAT
-      ansible.builtin.debug:
-        msg: "Der extrahierte PAT ist '{{ gitlab_admin_pat }}' (Länge: {{ gitlab_admin_pat | length }})"
-
-    # ######################################
-    # NEU: 2.2 ADMIN PAT ALS CI/CD VARIABLE SPEICHERN
-    # ######################################
-    - name: Create all puzzle repositories
-      community.general.gitlab_project:
-        api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
-        name: "{{ item.name }}"
-        path: "{{ item.path }}"
-        state: "present"
-        visibility: "private"
-        initialize_with_readme: true
-      loop: "{{ puzzle_projects }}"
-
-    - name: Set GITLAB_ADMIN_TOKEN in all puzzle repos
-      community.general.gitlab_project_variable:
-        api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
-        project: "root/{{ item.path }}" # Gilt für riddle-01, -02, -03
-        state: present
-        variables:
-          - name: "GITLAB_ADMIN_TOKEN" # Wird für den Trigger-API-Aufruf benötigt
-            value: "{{ gitlab_admin_pat }}"
-            protected: false
-            masked: false
-      loop: "{{ puzzle_projects }}"
-
-    - name: Set CI/CD variables in Admin Repo (for unlock logic)
-      community.general.gitlab_project_variable:
-        api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
-        project: "root/admin-ci-templates" # Gilt für das Admin-Repo
-        state: present
-        variables:
-          - name: "GITLAB_ADMIN_TOKEN" # Wird für das Klonen & Freischalten benötigt
-            value: "{{ gitlab_admin_pat }}"
-            protected: false
-            masked: false
-          - name: "RIDDLE_USER_ID" # ID des 'riddle' Users
-            value: "{{ riddle_user_id }}"
-            protected: false
-
-    # ######################################
-    # 3. CI-VARIABLEN IN BEIDEN REPOS SETZEN
-    # ######################################
-    # !! muss man beim intiale setup machen weil url vl erst später erreichbar ist auch wenn container gitlab healthy
-    # Fügen Sie DIESEN TASK VOR dem Klon-Task ein:
-    # - name: Wait 30 seconds for GitLab Git services to stabilize
-    #   ansible.builtin.pause:
-    #     seconds: 30
-    - name: Clone riddle-01 repository locally in Ansible container
+    - name: Clone riddle-01 repository
       ansible.builtin.git:
-        # Authentifizierung als root (mit dem neuen Passwort) über HTTP
         repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[0].path }}.git"
-        dest: "/tmp/riddle-01-repo" # Temporärer Klon-Pfad im Container
+        dest: "/tmp/riddle-01-repo"
         version: "main"
         force: true
-      # Benötigt python-gitlab nicht, verwendet das git-Binary
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
 
-    - name: Copy initial files into cloned repository
+    - name: Copy initial files to riddle-01
       ansible.builtin.copy:
-        # Pfad im Ansible-Container, wo Ihre Dateien liegen
         src: "/work/riddle-01-files/{{ item }}"
         dest: "/tmp/riddle-01-repo/{{ item }}"
-        mode: "0755" # Setzt Ausführungsberechtigung für solve.sh
+        mode: "0755"
       loop:
         - .gitlab-ci.yml
         - solve.sh
 
-    - name: Commit and push initial files to GitLab
+    - name: Wait for GitLab Internal API to stabilize
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-01 content (High Latency)
       ansible.builtin.shell:
         cmd: |
-          # Gehe in das geklonte Repo
           cd /tmp/riddle-01-repo
-          # Globale Git-Config setzen (nur für diesen Commit)
+          git config http.postBuffer 524288000
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"
           git add .
-          git commit -m "Initial riddle setup and CI pipeline."
+          git commit -m "Initial content" || echo "No changes"
           git push origin main
         executable: /bin/sh
-      register: git_output
-      # Markiert den Task als 'changed', wenn etwas gepusht wurde
-      changed_when: "'Everything up-to-date' not in git_output.stdout"
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
 
-    - name: Unprotect 'main' branch for Developer push access on ALL puzzles
+    # ---------------------------------------------------------
+    # 6. PERMISSIONS
+    # ---------------------------------------------------------
+    - name: Unprotect main branch
       community.general.gitlab_protected_branch:
         api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
+        api_token: "{{ gitlab_admin_pat }}"
         project: "root/{{ item.path }}"
         name: "main"
         state: present
-        push_access_level: developer # Erlaubt Developern das Pushen
-        merge_access_levels: developer # Erlaubt Developern das Mergen
-
+        push_access_level: developer
+        merge_access_levels: developer
       loop: "{{ puzzle_projects }}"
+      register: protect_retry
+      until: protect_retry is success
+      retries: 20
+      delay: 3
 
-    - name: Grant 'riddle' Developer access to the first puzzle (riddle-01-start)
+    - name: Grant riddle user access
       community.general.gitlab_project_members:
         api_url: "{{ gitlab_base_url }}"
-        api_username: "root"
-        api_password: "{{ new_gitlab_root_password }}"
+        api_token: "{{ gitlab_admin_pat }}"
         project: "{{ puzzle_projects[0].path }}"
         gitlab_user: "{{ riddle_username }}"
         access_level: "developer"
         state: "present"
+      register: member_retry
+      until: member_retry is success
+      retries: 20
+      delay: 3
 
-    # ######################################
-    # 3. RUNNER SETUP
-    # ######################################
-    # --- NEUER TASK 1: Runner Token auslesen ---
-    - name: Get the Instance Runner Registration Token
+    # ---------------------------------------------------------
+    # 7. RUNNER CREATION (FIXED TAGS)
+    # ---------------------------------------------------------
+    - name: Create Instance Runner and get Authentication Token
       community.docker.docker_container_exec:
         container: "{{ gitlab_container_name }}"
-        # Dieser Befehl liest den globalen Runner-Registrierungs-Token aus
-        # Dieser Befehl ist mit GitLab 17+ kompatibel
         command: >-
-          gitlab-rails runner "puts Gitlab::CurrentSettings.current_application_settings.runners_registration_token"
+          gitlab-rails runner "
+          STDOUT.sync = true;
+          Ci::Runner.where(description: 'Ansible Docker Runner').destroy_all;
+          
+          runner = Ci::Runner.new(
+            runner_type: 'instance_type',
+            description: 'Ansible Docker Runner',
+            active: true,
+            access_level: :not_protected,
+            # FIX IS HERE: Added 'local' to the tags
+            tag_list: ['docker', 'local'],
+            run_untagged: true,
+            locked: false
+          );
+          
+          if runner.save!
+            puts runner.token
+          end"
       register: runner_token_raw
-      changed_when: false
+      changed_when: runner_token_raw.stdout | trim | length > 10
+      failed_when: runner_token_raw.rc != 0
+      retries: 20
+      delay: 5
+      until: runner_token_raw.rc == 0
 
-    # --- NEUER TASK 2: Token extrahieren ---
     - name: Extract runner token
       ansible.builtin.set_fact:
-        # 'trim' entfernt eventuelle Leerzeilen/Zeilenumbrüche
         runner_token: "{{ runner_token_raw.stdout | trim }}"
 
-    - name: Show new runner token
-      ansible.builtin.debug:
-        var: runner_token
-        verbosity: 1
-
-    - name: Ensure runner_init.sh is executable
-      # Der Pfad /project/runner_init.sh referenziert die Datei
-      # auf dem Host, da das /project-Volume gemountet ist.
-      ansible.builtin.file:
-        path: "/project/seedGitlab/runner_init.sh"
-        mode: "0755" # Setzt die Ausführungsberechtigung (+x) für den Besitzer und die Gruppe
-
-    # --- NEUER TASK 3: config.toml Datei schreiben ---
-    - name: Write runner.env file for gitlab-runner service
+    - name: Save Runner Token to shared file
       ansible.builtin.copy:
-        # /project/ ist der Mount-Punkt für dein '.'-Verzeichnis auf dem Host
-        dest: "{{ runner_env_path }}"
+        content: "{{ runner_token }}"
+        dest: "{{ runner_token_path }}"
         mode: "0644"
-        # Dies ist eine minimale, funktionierende config.toml
-        content: |
-          # Diese Datei wird von seed.yml automatisch generiert
-          # WICHTIG: RUNNER_TOKEN (NICHT token=)
-          RUNNER_TOKEN={{ runner_token }}
-
-          # Diese Variablen werden ebenfalls vom Entrypoint gelesen:
-          CI_SERVER_URL={{ gitlab_base_url }}
-          RUNNER_EXECUTOR=docker
-          DOCKER_IMAGE=alpine:3.20
-          RUNNER_DESCRIPTION=local-docker-runner
-          RUNNER_TAG_LIST=local,docker
-          RUNNER_RUN_UNTAGGED=true
-          RUNNER_LOCKED=false
-      register: env_file_written
-
-    - name: Show env file write status
-      ansible.builtin.debug:
-        var: env_file_written.dest
-        verbosity: 1

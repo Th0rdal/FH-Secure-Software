@@ -8,7 +8,7 @@ trigger_riddle_tester:
     - apk add --no-cache curl jq
   script:
     - |
-      echo "🚀 Triggering Admin Pipeline via API..."
+      echo "Triggering Admin Pipeline via API..."
 
       # 1. Build JSON Payload safely
       PAYLOAD=$(jq -n \
@@ -16,7 +16,7 @@ trigger_riddle_tester:
         --arg project "$CI_PROJECT_PATH" \
         --arg sha "$CI_COMMIT_SHA" \
         --arg tf "admin-riddle-01" \
-        --arg next "riddle-02-files" \
+        --arg next "riddle-02" \
         '{
           ref: $ref,
           variables: [
@@ -39,12 +39,12 @@ trigger_riddle_tester:
       pipeline_id=$(echo "$response" | jq -r '.id')
 
       if [ "$pipeline_id" == "null" ] || [ -z "$pipeline_id" ]; then
-        echo "❌ Failed to trigger pipeline. Response:"
+        echo "Failed to trigger pipeline. Response:"
         echo "$response"
         exit 1
       fi
 
-      echo "✅ Pipeline triggered! ID: $pipeline_id. Waiting for result..."
+      echo "Pipeline triggered! ID: $pipeline_id. Waiting for result..."
 
       # 4. Poll loop
       while true; do
@@ -56,10 +56,10 @@ trigger_riddle_tester:
         echo "   Status: $status"
 
         if [ "$status" == "success" ]; then
-          echo "🎉 Admin Pipeline Succeeded!"
+          echo "Admin Pipeline Succeeded!"
           exit 0
         elif [ "$status" == "failed" ] || [ "$status" == "canceled" ]; then
-          echo "💥 Admin Pipeline Failed!"
+          echo "Admin Pipeline Failed!"
           exit 1
         fi
       done

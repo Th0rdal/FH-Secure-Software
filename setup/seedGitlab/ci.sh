@@ -2,19 +2,21 @@
 testfolder="$1"
 
 echo "The argument is: $testfolder"
+cd riddle
+echo "${ls}"
+ls
 
 run_case_1() {
   apk add --no-cache python3 py3-pip
   python3 -m venv ./venv
   . ./venv/bin/activate
   pip install pytest
-  cd riddle
   pytest
 }
 
 run_case_2() {
   apk add --no-cache rust cargo
-  cargo test -q > /dev/null 2>&1
+  cargo test
 }
 
 run_case_3() {
@@ -26,8 +28,8 @@ run_case_3() {
 run_case_4() {
   apk add --no-cache openjdk21-jre
   apk add --no-cache openjdk21-jdk
+  apk add curl
   curl -L -o junit.jar "https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.3/junit-platform-console-standalone-1.10.3.jar"
-  cd admin-riddle-04
   javac -cp .:junit.jar *.java
   java -jar junit.jar execute --class-path . --scan-class-path
 }

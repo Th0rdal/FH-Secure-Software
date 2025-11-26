@@ -228,11 +228,17 @@
         dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
         mode: "0644"
 
+    - name: Copy CI template file
+      ansible.builtin.copy:
+        src: "/work/ci.sh"
+        dest: "/tmp/admin-ci-repo/ci.sh"
+        mode: "0644"
+
     - name: Copy initial files to riddle admin
       ansible.builtin.copy:
         src: "/work/{{ item }}"
-        dest: "/tmp/{{ item }}"
-        # No 'mode' or 'recurse' here to avoid errors on mixed file types
+        # CHANGE THIS: Point to the parent repo folder only
+        dest: "/tmp/admin-ci-repo/"
       loop:
         - admin-riddle-01
         - admin-riddle-02
@@ -258,6 +264,10 @@
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"
           git add .
+          git add admin-riddle-01/*
+          git add admin-riddle-02/*
+          git add admin-riddle-03/*
+          git add admin-riddle-04/*
           git commit -m "Initial riddle test logic" || echo "No changes"
           git push origin main
         executable: /bin/sh

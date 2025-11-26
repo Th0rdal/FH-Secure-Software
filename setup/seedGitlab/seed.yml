@@ -300,7 +300,7 @@
       loop:
         - .gitlab-ci.yml
         - config_writer.py
-        - readme.md
+        - README.md
 
     - name: Wait for GitLab Internal API to stabilize
       ansible.builtin.pause:
@@ -343,7 +343,7 @@
       loop:
         - .gitlab-ci.yml
         - database.rs
-        - readme.md
+        - README.md
 
     - name: Wait for GitLab Internal API to stabilize 2
       ansible.builtin.pause:
@@ -387,7 +387,7 @@
         - .gitlab-ci.yml
         - extension.h
         - file.c
-        - readme.md
+        - README.md
 
     - name: Wait for GitLab Internal API to stabilize 3
       ansible.builtin.pause:
@@ -434,7 +434,7 @@
         - SecurityContext.java
         - Service.java
         - User.java
-        - readme.md
+        - README.md
 
     - name: Wait for GitLab Internal API to stabilize 4
       ansible.builtin.pause:
@@ -475,7 +475,7 @@
         dest: "/tmp/riddle-05-repo/{{ item }}"
         mode: "0755"
       loop:
-        - more_comming_soon_maybe.md
+        - README.md
 
     - name: Wait for GitLab Internal API to stabilize 5
       ansible.builtin.pause:

@@ -1,0 +1,5 @@
+YOU HAVE CONQUERED THE 4 RIDDLES OF THE WISE MEN.
+
+CONGRATULATIONS!!!
+
+more comming soon (mabye) :D

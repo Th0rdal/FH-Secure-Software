@@ -20,6 +20,8 @@
         path: "riddle-03"
       - name: "riddle-04"
         path: "riddle-04"
+      - name: "riddle-05"
+        path: "riddle-05"
     runner_token_path: "/project/seedGitlab/runner_token"
 
   tasks:
@@ -228,16 +230,23 @@
         dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
         mode: "0644"
 
+    - name: Copy CI template file
+      ansible.builtin.copy:
+        src: "/work/ci.sh"
+        dest: "/tmp/admin-ci-repo/ci.sh"
+        mode: "0644"
+
     - name: Copy initial files to riddle admin
       ansible.builtin.copy:
         src: "/work/{{ item }}"
-        dest: "/tmp/{{ item }}"
-        # No 'mode' or 'recurse' here to avoid errors on mixed file types
+        # CHANGE THIS: Point to the parent repo folder only
+        dest: "/tmp/admin-ci-repo/"
       loop:
         - admin-riddle-01
         - admin-riddle-02
         - admin-riddle-03
         - admin-riddle-04
+        - admin-riddle-05
 
     - name: Ensure recursive permissions
       ansible.builtin.file:
@@ -250,6 +259,7 @@
         - admin-riddle-02
         - admin-riddle-03
         - admin-riddle-04
+        - admin-riddle-05
 
     - name: Commit and push CI template
       ansible.builtin.shell:
@@ -258,6 +268,11 @@
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"
           git add .
+          git add admin-riddle-01/*
+          git add admin-riddle-02/*
+          git add admin-riddle-03/*
+          git add admin-riddle-04/*
+          git add admin-riddle-05/*
           git commit -m "Initial riddle test logic" || echo "No changes"
           git push origin main
         executable: /bin/sh
@@ -528,3 +543,78 @@
       loop: "{{ runners_created.results }}"
       loop_control:
         label: "{{ item.item.description }}"
+
+# ---------------------------------------------------------
+    # CLEANUP: CANCEL PENDING PIPELINES
+    # ---------------------------------------------------------
+
+# ---------------------------------------------------------
+    # GLOBAL CLEANUP: NUKE ALL PIPELINES
+    # ---------------------------------------------------------
+
+    - name: Wait for GitLab Internal API to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+
+# ---------------------------------------------------------
+    # GLOBAL CLEANUP: NUKE ALL PIPELINES (PYTHON SCRIPT)
+    # ---------------------------------------------------------
+    - name: "Nuke ALL pipelines in ALL projects (Python Script)"
+      ansible.builtin.shell:
+        cmd: |
+          {{ ansible_python_interpreter }} -c '
+          import json
+          import urllib.request
+          import urllib.error
+          import time
+
+          GITLAB_URL = "{{ gitlab_base_url }}"
+          TOKEN = "{{ gitlab_admin_pat }}"
+          HEADERS = {"PRIVATE-TOKEN": TOKEN}
+
+          def api_req(endpoint, method="GET"):
+              url = f"{GITLAB_URL}/api/v4/{endpoint}"
+              req = urllib.request.Request(url, headers=HEADERS, method=method)
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      return json.loads(response.read().decode())
+              except urllib.error.HTTPError as e:
+                  # Ignore 409 (Conflict) and 404 (Not Found) during cancellation
+                  if e.code in [409, 404]:
+                      return None
+                  print(f"Error {e.code} on {url}")
+                  return []
+
+          print("--- Starting Global Pipeline Cleanup ---")
+
+          # 1. Get ALL Projects
+          # (per_page=100 to get maximum, assuming you have <100 projects for now)
+          projects = api_req("projects?per_page=100&simple=true")
+          
+          if not projects:
+              print("No projects found.")
+              exit(0)
+
+          print(f"Found {len(projects)} projects. Scanning for pipelines...")
+
+          for p in projects:
+              pid = p["id"]
+              pname = p["path_with_namespace"]
+              
+              # 2. Check for Pending/Running pipelines in this project
+              # We check both states to be thorough
+              for status in ["pending", "running"]:
+                  pipelines = api_req(f"projects/{pid}/pipelines?status={status}")
+                  
+                  if pipelines:
+                      print(f"Project {pname}: Found {len(pipelines)} {status} pipelines.")
+                      
+                      for pipe in pipelines:
+                          pipe_id = pipe["id"]
+                          print(f" -> Canceling Pipeline {pipe_id}...")
+                          api_req(f"projects/{pid}/pipelines/{pipe_id}/cancel", method="POST")
+          
+          print("--- Cleanup Complete ---")
+          '
+      register: cleanup_output
+      changed_when: "'Canceling' in cleanup_output.stdout"

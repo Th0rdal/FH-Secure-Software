@@ -1,57 +1,67 @@
-# Diese Datei liegt in /work/riddle-01-files/.gitlab-ci.yml
-# und wird von Ansible kopiert.
-
 stages:
   - trigger_test
 
 trigger_riddle_tester:
   stage: trigger_test
-  image: alpine:3.19
+  image: alpine:3.20
   before_script:
-    - apk update && apk add curl
+    - apk add --no-cache curl jq
   script:
     - |
-      echo "Triggering private test pipeline..."
+      echo "Triggering Admin Pipeline via API..."
 
-      # --- DEBUGGING TOKEN ---
-      echo "Prüfe Token-Status..."
-      # Die gesamte Logik innerhalb des 'pipe' Blocks
-      if [ -z "${GITLAB_ADMIN_TOKEN}" ]; then
-        echo "FEHLER: Token ist LEER!";
-      else
-        echo "Token ist vorhanden.";
-      fi
+      # 1. Build JSON Payload safely
+      PAYLOAD=$(jq -n \
+        --arg ref "main" \
+        --arg project "$CI_PROJECT_PATH" \
+        --arg sha "$CI_COMMIT_SHA" \
+        --arg tf "admin-riddle-03" \
+        --arg next "riddle-04" \
+        '{
+          ref: $ref,
+          variables: [
+            {key: "RIDDLE_PROJECT_PATH", value: $project},
+            {key: "RIDDLE_COMMIT_SHA", value: $sha},
+            {key: "testfolder", value: $tf},
+            {key: "NEXT_RIDDLE_PATH", value: $next}
+          ]
+        }')
 
-      echo "Token-Länge (sollte > 0 sein): $(echo -n ${GITLAB_ADMIN_TOKEN} | wc -c)"
-      echo "Token-Wert (zur Kontrolle): '${GITLAB_ADMIN_TOKEN}'"
-      echo "ADMIN_CI_PROJECT_ID Variablen check"
-      echo "${ADMIN_CI_PROJECT_ID}"
-      echo "--- END DEBUGGING ---"
-
-      # Der eigentliche API-Aufruf:
-      # 1. Verwendung der Projekt-ID ${ADMIN_CI_PROJECT_ID} (statt root%2F...)
-      # 2. Token in einfachen Anführungszeichen (PRIVATE-TOKEN: '...')
-
-      # We use the standard /pipeline endpoint because we are using a User PAT (PRIVATE-TOKEN),
-      # not a Project Trigger Token.
-      API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
-        --request POST \
+      # 2. Trigger the pipeline
+      echo "Sending Request..."
+      response=$(curl --silent --show-error --request POST \
         --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
         --header "Content-Type: application/json" \
-        --data "{ \"ref\": \"main\", \"variables\": [ {\"key\": \"RIDDLE_PROJECT_PATH\", \"value\": \"${CI_PROJECT_PATH}\"}, {\"key\": \"RIDDLE_COMMIT_SHA\", \"value\": \"${CI_COMMIT_SHA}\"}, {\"key\": \"testfolder\": \"value\" \"admin-riddle-03\"},, {\"key\": \"NEXT_RIDDLE_PATH\", \"value\": \"riddle-04\"} ] }" \
-        "${CI_SERVER_URL}/api/v4/projects/1/pipeline")
+        --data "$PAYLOAD" \
+        "${CI_SERVER_URL}/api/v4/projects/root%2Fadmin-ci-templates/pipeline")
 
-      # Parse response
-      HTTP_BODY=$(echo "$API_RESPONSE" | sed '$d')
-      HTTP_STATUS=$(echo "$API_RESPONSE" | tail -n1 | sed 's/HTTP_STATUS://')
+      # 3. Extract Pipeline ID
+      pipeline_id=$(echo "$response" | jq -r '.id')
 
-      if [ "$HTTP_STATUS" -ne 201 ]; then
-        echo "Error creating pipeline. Status: $HTTP_STATUS"
-        echo "Response: $HTTP_BODY"
+      if [ "$pipeline_id" == "null" ] || [ -z "$pipeline_id" ]; then
+        echo "Failed to trigger pipeline. Response:"
+        echo "$response"
         exit 1
-      else
-        echo "Pipeline created successfully!"
       fi
 
+      echo "Pipeline triggered! ID: $pipeline_id. Waiting for result..."
+
+      # 4. Poll loop
+      while true; do
+        sleep 5
+        status_json=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+          "${CI_SERVER_URL}/api/v4/projects/root%2Fadmin-ci-templates/pipelines/${pipeline_id}")
+        
+        status=$(echo "$status_json" | jq -r '.status')
+        echo "   Status: $status"
+
+        if [ "$status" == "success" ]; then
+          echo "Admin Pipeline Succeeded!"
+          exit 0
+        elif [ "$status" == "failed" ] || [ "$status" == "canceled" ]; then
+          echo "Admin Pipeline Failed!"
+          exit 1
+        fi
+      done
   tags:
     - local

@@ -4,7 +4,7 @@ stages:
 
 run_riddle_test:
   stage: test
-  image: alpine:3.19
+  image: alpine:3.20
   variables:
     # Wir deaktivieren die Standard-Git-Strategie, um manuell zu klonen
     GIT_STRATEGY: clone
@@ -21,7 +21,7 @@ run_riddle_test:
     # Auschecken des genauen Commits, den der User gepusht hat
     - git checkout "${RIDDLE_COMMIT_SHA}"
     - cd ..
-    - mv admin-riddle-01/* riddle/
+    - mv ${testfolder}/* riddle/
     - ls riddle/
   script:
     # Der eigentliche Test

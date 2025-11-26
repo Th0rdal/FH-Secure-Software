@@ -12,12 +12,14 @@
     riddle_user_password: "sadfsadf32!"
     riddle_email: "riddle@local.lab"
     puzzle_projects:
-      - name: "riddle-01-start"
+      - name: "riddle-01"
         path: "riddle-01"
-      - name: "riddle-02-files-ci-key"
-        path: "riddle-02-files"
-      - name: "riddle-03-deploy"
+      - name: "riddle-02"
+        path: "riddle-02"
+      - name: "riddle-03"
         path: "riddle-03"
+      - name: "riddle-04"
+        path: "riddle-04"
     runner_token_path: "/project/seedGitlab/runner_token"
 
   tasks:
@@ -226,6 +228,29 @@
         dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
         mode: "0644"
 
+    - name: Copy initial files to riddle admin
+      ansible.builtin.copy:
+        src: "/work/{{ item }}"
+        dest: "/tmp/{{ item }}"
+        # No 'mode' or 'recurse' here to avoid errors on mixed file types
+      loop:
+        - admin-riddle-01
+        - admin-riddle-02
+        - admin-riddle-03
+        - admin-riddle-04
+
+    - name: Ensure recursive permissions
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: directory
+        mode: "0755"
+        recurse: yes  # This works in the 'file' module!
+      loop:
+        - admin-riddle-01
+        - admin-riddle-02
+        - admin-riddle-03
+        - admin-riddle-04
+
     - name: Commit and push CI template
       ansible.builtin.shell:
         cmd: |
@@ -259,7 +284,7 @@
         mode: "0755"
       loop:
         - .gitlab-ci.yml
-        - solve.sh
+        - config_writer.py
 
     - name: Wait for GitLab Internal API to stabilize
       ansible.builtin.pause:
@@ -301,6 +326,7 @@
         mode: "0755"
       loop:
         - .gitlab-ci.yml
+        - database.rs
 
     - name: Wait for GitLab Internal API to stabilize 2
       ansible.builtin.pause:
@@ -342,6 +368,8 @@
         mode: "0755"
       loop:
         - .gitlab-ci.yml
+        - extension.h
+        - file.c
 
     - name: Wait for GitLab Internal API to stabilize 3
       ansible.builtin.pause:
@@ -351,6 +379,52 @@
       ansible.builtin.shell:
         cmd: |
           cd /tmp/riddle-03-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+# riddle 4
+
+    - name: Clone riddle-04 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[3].path }}.git"
+        dest: "/tmp/riddle-04-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-04-files
+      ansible.builtin.copy:
+        src: "/work/riddle-04-files/{{ item }}"
+        dest: "/tmp/riddle-04-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - .gitlab-ci.yml
+        - ApplicationSettings.java
+        - Role.java
+        - SecurityContext.java
+        - Service.java
+        - User.java
+
+    - name: Wait for GitLab Internal API to stabilize 4
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-04 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-04-repo
           git config http.postBuffer 524288000
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"
@@ -397,21 +471,36 @@
     # ---------------------------------------------------------
     # 7. RUNNER CREATION (FIXED TAGS)
     # ---------------------------------------------------------
-    - name: Create Instance Runner and get Authentication Token
+    - name: Define Runner Configurations
+      ansible.builtin.set_fact:
+        runners_config:
+          - description: "Ansible Docker Runner 1"
+            tags: "['docker', 'local', 'runner-01']"
+            token_path: "{{ runner_token_path }}_1"  # e.g. /path/token_1
+
+          - description: "Ansible Docker Runner 2"
+            tags: "['docker', 'local', 'runner-02']"
+            token_path: "{{ runner_token_path }}_2"  # e.g. /path/token_2
+
+    # ---------------------------------------------------------
+    # 1. CREATE BOTH RUNNERS (LOOP)
+    # ---------------------------------------------------------
+    - name: Create Instance Runners via Rails
       community.docker.docker_container_exec:
         container: "{{ gitlab_container_name }}"
         command: >-
           gitlab-rails runner "
           STDOUT.sync = true;
-          Ci::Runner.where(description: 'Ansible Docker Runner').destroy_all;
+          
+          # Only destroy runners with THIS specific description
+          Ci::Runner.where(description: '{{ item.description }}').destroy_all;
           
           runner = Ci::Runner.new(
             runner_type: 'instance_type',
-            description: 'Ansible Docker Runner',
+            description: '{{ item.description }}',
             active: true,
             access_level: :not_protected,
-            # FIX IS HERE: Added 'local' to the tags
-            tag_list: ['docker', 'local'],
+            tag_list: {{ item.tags }},
             run_untagged: true,
             locked: false
           );
@@ -419,19 +508,23 @@
           if runner.save!
             puts runner.token
           end"
-      register: runner_token_raw
-      changed_when: runner_token_raw.stdout | trim | length > 10
-      failed_when: runner_token_raw.rc != 0
+      register: runners_created
+      changed_when: runners_created.stdout | trim | length > 10
+      failed_when: runners_created.rc != 0
       retries: 20
       delay: 5
-      until: runner_token_raw.rc == 0
+      until: runners_created.rc == 0
+      loop: "{{ runners_config }}"
 
-    - name: Extract runner token
-      ansible.builtin.set_fact:
-        runner_token: "{{ runner_token_raw.stdout | trim }}"
-
-    - name: Save Runner Token to shared file
+    # ---------------------------------------------------------
+    # 2. SAVE TOKENS TO FILES
+    # ---------------------------------------------------------
+    - name: Save Runner Tokens to separate files
       ansible.builtin.copy:
-        content: "{{ runner_token }}"
-        dest: "{{ runner_token_path }}"
+        content: "{{ item.stdout | trim }}"
+        dest: "{{ item.item.token_path }}"
         mode: "0644"
+      # Loop over the RESULTS of the previous task
+      loop: "{{ runners_created.results }}"
+      loop_control:
+        label: "{{ item.item.description }}"

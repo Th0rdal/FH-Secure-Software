@@ -3,7 +3,7 @@ import stat
 from pathlib import Path
 
 try:
-    from permissions import SecureConfigWriter
+    from config_writer import SecureConfigWriter
 except ImportError:
     pytest.fail("Konnte 'config_writer.py' nicht finden.")
 

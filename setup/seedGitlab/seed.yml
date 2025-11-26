@@ -246,6 +246,7 @@
         - admin-riddle-02
         - admin-riddle-03
         - admin-riddle-04
+        - admin-riddle-05
 
     - name: Ensure recursive permissions
       ansible.builtin.file:
@@ -258,6 +259,7 @@
         - admin-riddle-02
         - admin-riddle-03
         - admin-riddle-04
+        - admin-riddle-05
 
     - name: Commit and push CI template
       ansible.builtin.shell:
@@ -270,6 +272,7 @@
           git add admin-riddle-02/*
           git add admin-riddle-03/*
           git add admin-riddle-04/*
+          git add admin-riddle-05/*
           git commit -m "Initial riddle test logic" || echo "No changes"
           git push origin main
         executable: /bin/sh

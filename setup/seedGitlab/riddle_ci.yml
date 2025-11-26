@@ -1,0 +1,84 @@
+stages:
+  - test
+  - unlock
+
+run_riddle_test:
+  stage: test
+  image: alpine:3.20
+  variables:
+    # Wir deaktivieren die Standard-Git-Strategie, um manuell zu klonen
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "1"
+  before_script:
+    - apk update && apk add git
+
+    - echo ${RIDDLE_PROJECT_PATH}
+    - mkdir riddle
+    - cd riddle
+    # Klonen des User-Repos mit dem Admin-Token
+    # RIDDLE_PROJECT_PATH wird vom Trigger übergeben (z.B. "root/riddle-01")
+    - git clone "http://root:${GITLAB_ADMIN_TOKEN}@gitlab/${RIDDLE_PROJECT_PATH}.git" .
+    # Auschecken des genauen Commits, den der User gepusht hat
+    - git checkout "${RIDDLE_COMMIT_SHA}"
+    - cd ..
+    - mv ${testfolder}/* riddle/
+    - ls riddle/
+  script:
+    # Der eigentliche Test
+    - ls
+    - pwd
+    - chmod +x ./ci.sh
+    - sed -i 's/\r$//' ./ci.sh
+    - echo ${testfolder}
+    - ./ci.sh ${testfolder}
+  tags:
+    - local
+
+unlock_next_riddle:
+  stage: unlock
+  image: alpine:3.19
+  variables:
+    DEVELOPER_ACCESS: 30
+
+  when: on_success
+
+  before_script:
+    - apk update
+    - apk add curl jq # Installiert die benötigten Tools
+
+  script:
+    - echo "Starte Freischaltung von ${NEXT_RIDDLE_PATH} für User ${RIDDLE_USER_ID}..."
+
+    # Der vollständige Projektnamensraum muss für die API URL-enkodiert sein.
+    # Der vollständige Pfad wird aus der CI/CD Variable (NEXT_RIDDLE_PATH) und dem statischen Namespace (root) gebildet.
+    # WICHTIG: Die Variable NEXT_RIDDLE_PATH MUSS "root/riddle-02" sein (siehe Seed.yml Korrektur).
+    - FULL_PROJECT_PATH="root%2F${NEXT_RIDDLE_PATH}" # URL-enkodiere den Schrägstrich für die URL
+    - echo "${FULL_PROJECT_PATH}"
+    - echo "${NEXT_RIDDLE_PATH}"
+    # 1. API-Aufruf ausführen und HTTP-Status sowie Antwort trennen
+    - |
+      API_RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_STATUS:%{http_code}" \
+        --request POST "${CI_SERVER_URL}/api/v4/projects/${FULL_PROJECT_PATH}/members" \
+        --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data "{\"user_id\": ${RIDDLE_USER_ID}, \"access_level\": ${DEVELOPER_ACCESS}}")
+
+    # 2. Antwort-Parsing
+    - HTTP_STATUS=$(echo "$API_RESPONSE" | tail -n 1 | sed 's/HTTP_STATUS://')
+    - RESPONSE_BODY=$(echo "$API_RESPONSE" | head -n -1)
+
+    # 3. KORREKTUR DER FEHLERHAFTEN YAML-STRUKTUR:
+    # Jede Zeile im if-Block muss ein eigenes Shell-Kommando sein (beginnt mit '-')
+
+    - |
+      if [ "$HTTP_STATUS" -ne 201 ] && [ "$HTTP_STATUS" -ne 409 ]; then
+        echo "FEHLER: Freischaltung fehlgeschlagen! HTTP Status: $HTTP_STATUS"
+        echo "Antwort: $RESPONSE_BODY"
+        exit 1
+      fi
+
+    # 4. Erfolgsmeldung (auch bei 409, da dies 'bereits Mitglied' bedeutet)
+    - echo "Rätsel ${NEXT_RIDDLE_PATH} erfolgreich freigeschaltet oder war bereits freigeschaltet (Status $HTTP_STATUS)."
+
+  tags:
+    - local

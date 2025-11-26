@@ -1,0 +1,186 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:18.5.1-ce.0
+    container_name: gitlab
+    restart: always
+    ports:
+      - "80:80"
+      - "2222:22"
+    environment:
+      GITLAB_ROOT_PASSWORD: "2ada54772a7b!"
+      GITLAB_OMNIBUS_CONFIG: |
+        letsencrypt['enable'] = false
+        gitlab_rails['initial_root_password_expiration'] = false
+        nginx['listen_port']  = 80
+        nginx['listen_https'] = false
+        external_url 'http://gitlab'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+    networks:
+      public: {}
+      backend: {}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/-/readiness >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 30s
+      retries: 60
+      start_period: 90s
+
+  # -------------------------------------------------------------------
+  # RUNNER 1
+  # -------------------------------------------------------------------
+  gitlab-runner-1:
+    image: gitlab/gitlab-runner:alpine-v17.6.0
+    container_name: gitlab-runner-1
+    restart: always
+    depends_on:
+      ansible:
+        condition: service_completed_successfully
+    volumes:
+      # Important: Distinct volume for config so they don't overwrite each other
+      - runner-config-1:/etc/gitlab-runner
+      - ./seedGitlab:/seedGitlab
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      backend: {}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # --- CONFIGURATION FOR RUNNER 1 ---
+        TOKEN_FILE=/seedGitlab/runner_token_1
+        CONFIG_FILE=/etc/gitlab-runner/config.toml
+        
+        echo "Runner 1: Waiting for Ansible..."
+        
+        # Simple wait loop in case file creation is lagging slightly
+        while [ ! -f "$$TOKEN_FILE" ]; do
+           echo "Waiting for token file: $$TOKEN_FILE..."
+           sleep 2
+        done
+
+        RUNNER_TOKEN=$$(cat "$$TOKEN_FILE")
+        echo "Runner 1: Token found. Configuring..."
+        
+        mkdir -p /etc/gitlab-runner
+        cat > $$CONFIG_FILE <<EOF
+        concurrent = 1
+        check_interval = 0
+        [[runners]]
+          name = "Ansible Docker Runner 1"
+          url = "http://gitlab"
+          token = "$$RUNNER_TOKEN"
+          executor = "docker"
+          [runners.custom_build_dir]
+          [runners.cache]
+            MaxUploadedArchiveSize = 0
+          [runners.docker]
+            tls_verify = false
+            image = "alpine:latest"
+            privileged = true
+            disable_entrypoint_overwrite = false
+            oom_kill_disable = true
+            disable_cache = false
+            volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+            shm_size = 0
+            network_mode = "backend"
+            pull_policy = "if-not-present"
+        EOF
+        
+        echo "Runner 1: Starting..."
+        exec /usr/bin/gitlab-runner run
+
+  # -------------------------------------------------------------------
+  # RUNNER 2
+  # -------------------------------------------------------------------
+  gitlab-runner-2:
+    image: gitlab/gitlab-runner:alpine-v17.6.0
+    container_name: gitlab-runner-2
+    restart: always
+    depends_on:
+      ansible:
+        condition: service_completed_successfully
+    volumes:
+      # Important: Distinct volume for config
+      - runner-config-2:/etc/gitlab-runner
+      - ./seedGitlab:/seedGitlab
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      backend: {}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # --- CONFIGURATION FOR RUNNER 2 ---
+        TOKEN_FILE=/seedGitlab/runner_token_2
+        CONFIG_FILE=/etc/gitlab-runner/config.toml
+        
+        echo "Runner 2: Waiting for Ansible..."
+
+        while [ ! -f "$$TOKEN_FILE" ]; do
+           echo "Waiting for token file: $$TOKEN_FILE..."
+           sleep 2
+        done
+
+        RUNNER_TOKEN=$$(cat "$$TOKEN_FILE")
+        echo "Runner 2: Token found. Configuring..."
+        
+        mkdir -p /etc/gitlab-runner
+        cat > $$CONFIG_FILE <<EOF
+        concurrent = 1
+        check_interval = 0
+        [[runners]]
+          name = "Ansible Docker Runner 2"
+          url = "http://gitlab"
+          token = "$$RUNNER_TOKEN"
+          executor = "docker"
+          [runners.custom_build_dir]
+          [runners.cache]
+            MaxUploadedArchiveSize = 0
+          [runners.docker]
+            tls_verify = false
+            image = "alpine:latest"
+            privileged = true
+            disable_entrypoint_overwrite = false
+            oom_kill_disable = true
+            disable_cache = false
+            volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+            shm_size = 0
+            network_mode = "backend"
+            pull_policy = "if-not-present"
+        EOF
+        
+        echo "Runner 2: Starting..."
+        exec /usr/bin/gitlab-runner run
+
+  ansible:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        COLL_VER: "3.10.0"
+    container_name: ansible
+    working_dir: /work
+    volumes:
+      - ./:/project:rw
+      - ./seedGitlab/:/work:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      GITLAB_URL: http://gitlab
+    command: ["ansible-playbook", "/work/seed.yml"]
+    networks:
+      public: {}
+      backend: {}
+    depends_on:
+      gitlab:
+        condition: service_healthy
+
+volumes:
+  runner-config-1: {}
+  runner-config-2: {}
+
+networks:
+  public:
+    driver: bridge
+  backend:
+    driver: bridge
+    name: backend

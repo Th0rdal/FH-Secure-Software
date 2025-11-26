@@ -1,0 +1,665 @@
+- name: Bootstrap GitLab & Shared Runner
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    new_gitlab_root_password: "2ada54772a7b!"
+    gitlab_base_url: "http://gitlab"
+    gitlab_container_name: "gitlab"
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    riddle_username: "riddle"
+    riddle_user_password: "sadfsadf32!"
+    riddle_email: "riddle@local.lab"
+    puzzle_projects:
+      - name: "riddle-01"
+        path: "riddle-01"
+      - name: "riddle-02"
+        path: "riddle-02"
+      - name: "riddle-03"
+        path: "riddle-03"
+      - name: "riddle-04"
+        path: "riddle-04"
+      - name: "riddle-05"
+        path: "riddle-05"
+    runner_token_path: "/project/seedGitlab/runner_token"
+
+  tasks:
+    # ---------------------------------------------------------
+    # 0. CLEANUP
+    # ---------------------------------------------------------
+    - name: Remove stale runner token file
+      ansible.builtin.file:
+        path: "{{ runner_token_path }}"
+        state: absent
+
+    # ---------------------------------------------------------
+    # 1. INITIAL WAIT & AUTH
+    # ---------------------------------------------------------
+    - name: Wait for GitLab API to be ready (Anti-502)
+      ansible.builtin.uri:
+        url: "{{ gitlab_base_url }}/api/v4/version"
+        method: GET
+        validate_certs: false
+        status_code: [200, 401]
+      register: api_check
+      until: api_check.status in [200, 401]
+      retries: 100
+      delay: 5
+
+    - name: Change root password via rails runner
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        env:
+          NEWPW: "{{ new_gitlab_root_password }}"
+        command: >-
+          gitlab-rails runner "u = User.find_by_username('root'); 
+          u.password = ENV['NEWPW'];
+          u.password_confirmation = ENV['NEWPW']; 
+          u.save!; puts 'OK'"
+      register: exec_out
+      changed_when: "'OK' in (exec_out.stdout | default(''))"
+      retries: 5
+      delay: 5
+      until: exec_out.rc == 0
+
+    - name: Create Admin Personal Access Token (PAT)
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        command: >-
+          gitlab-rails runner "
+          user = User.find_by_username('root');
+          token = user.personal_access_tokens.create(
+            scopes: ['api'], 
+            name: 'ansible_pat', 
+            expires_at: 365.days.from_now
+          );
+          puts token.token"
+      register: admin_pat_raw
+      changed_when: admin_pat_raw.stdout | length > 20
+      retries: 5
+      delay: 5
+      until: admin_pat_raw.rc == 0
+
+    - name: Extract Admin PAT
+      ansible.builtin.set_fact:
+        gitlab_admin_pat: "{{ admin_pat_raw.stdout | trim }}"
+
+    # ---------------------------------------------------------
+    # 2. CREATE RESOURCES
+    # ---------------------------------------------------------
+    - name: Add Riddle User
+      community.general.gitlab_user:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        name: "Riddle User"
+        username: "{{ riddle_username }}"
+        password: "{{ riddle_user_password }}"
+        email: "{{ riddle_email }}"
+        confirm: no
+        state: present
+        validate_certs: no
+      register: riddle_user_details
+      until: riddle_user_details is success
+      retries: 20
+      delay: 5
+
+    - name: Extract riddle user ID
+      ansible.builtin.set_fact:
+        riddle_user_id: "{{ riddle_user_details.user.id }}"
+
+    - name: Create 'Admin CI Templates' repository
+      community.general.gitlab_project:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        name: "Admin CI Templates"
+        path: "admin-ci-templates"
+        visibility: "private"
+        initialize_with_readme: true
+        validate_certs: no
+      register: ci_template_repo_details
+      until: ci_template_repo_details is success
+      retries: 20
+      delay: 5
+
+    - name: Extract Admin CI Template Project ID
+      ansible.builtin.set_fact:
+        admin_ci_template_project_id: "{{ ci_template_repo_details.project.id }}"
+
+    - name: Create all puzzle repositories
+      community.general.gitlab_project:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        name: "{{ item.name }}"
+        path: "{{ item.path }}"
+        state: "present"
+        visibility: "private"
+        initialize_with_readme: true
+        validate_certs: no
+      loop: "{{ puzzle_projects }}"
+      register: project_creation
+      until: project_creation is success
+      retries: 20
+      delay: 5
+
+    # ---------------------------------------------------------
+    # 3. VERIFICATION & STABILIZATION
+    # ---------------------------------------------------------
+    - name: Verify riddle-01 project exists in API
+      ansible.builtin.uri:
+        url: "{{ gitlab_base_url }}/api/v4/projects/root%2F{{ puzzle_projects[0].path }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_admin_pat }}"
+        validate_certs: false
+        status_code: 200
+      register: project_ready_check
+      until: project_ready_check.status == 200
+      retries: 40
+      delay: 5
+
+    # ---------------------------------------------------------
+    # 4. CONFIGURE CI VARIABLES
+    # ---------------------------------------------------------
+    - name: Set ADMIN_CI_PROJECT_ID variable in riddle-01
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/{{ puzzle_projects[0].path }}"
+        variables:
+          - name: "ADMIN_CI_PROJECT_ID"
+            value: "{{ admin_ci_template_project_id }}"
+            protected: false
+            masked: false
+        state: present
+      register: set_var_result
+      until: set_var_result is success
+      retries: 20
+      delay: 3
+
+    - name: Set GITLAB_ADMIN_TOKEN in all puzzle repos
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/{{ item.path }}"
+        state: present
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN"
+            value: "{{ gitlab_admin_pat }}"
+            protected: false
+            masked: false
+      loop: "{{ puzzle_projects }}"
+      register: var_set_retry
+      until: var_set_retry is success
+      retries: 20
+      delay: 3
+
+    - name: Set variables in Admin Template Repo
+      community.general.gitlab_project_variable:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/admin-ci-templates"
+        state: present
+        variables:
+          - name: "GITLAB_ADMIN_TOKEN"
+            value: "{{ gitlab_admin_pat }}"
+          - name: "RIDDLE_USER_ID"
+            value: "{{ riddle_user_id }}"
+      register: admin_var_retry
+      until: admin_var_retry is success
+      retries: 20
+      delay: 3
+
+    # ---------------------------------------------------------
+    # 5. PUSH FILE CONTENT
+    # ---------------------------------------------------------
+    - name: Clone secure CI template repository locally
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/admin-ci-templates.git"
+        dest: "/tmp/admin-ci-repo"
+        version: "main"
+        force: true
+      register: clone_result
+      until: clone_result is success
+      retries: 20
+      delay: 5
+
+    - name: Copy CI template file
+      ansible.builtin.copy:
+        src: "/work/riddle_ci.yml"
+        dest: "/tmp/admin-ci-repo/.gitlab-ci.yml"
+        mode: "0644"
+
+    - name: Copy CI template file
+      ansible.builtin.copy:
+        src: "/work/ci.sh"
+        dest: "/tmp/admin-ci-repo/ci.sh"
+        mode: "0644"
+
+    - name: Copy initial files to riddle admin
+      ansible.builtin.copy:
+        src: "/work/{{ item }}"
+        # CHANGE THIS: Point to the parent repo folder only
+        dest: "/tmp/admin-ci-repo/"
+      loop:
+        - admin-riddle-01
+        - admin-riddle-02
+        - admin-riddle-03
+        - admin-riddle-04
+        - admin-riddle-05
+
+    - name: Ensure recursive permissions
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: directory
+        mode: "0755"
+        recurse: yes  # This works in the 'file' module!
+      loop:
+        - admin-riddle-01
+        - admin-riddle-02
+        - admin-riddle-03
+        - admin-riddle-04
+        - admin-riddle-05
+
+    - name: Commit and push CI template
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/admin-ci-repo
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git add admin-riddle-01/*
+          git add admin-riddle-02/*
+          git add admin-riddle-03/*
+          git add admin-riddle-04/*
+          git add admin-riddle-05/*
+          git commit -m "Initial riddle test logic" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: git_push_output
+      until: git_push_output.rc == 0
+      retries: 20
+      delay: 5
+
+    - name: Clone riddle-01 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[0].path }}.git"
+        dest: "/tmp/riddle-01-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-01
+      ansible.builtin.copy:
+        src: "/work/riddle-01-files/{{ item }}"
+        dest: "/tmp/riddle-01-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - .gitlab-ci.yml
+        - config_writer.py
+        - README.md
+
+    - name: Wait for GitLab Internal API to stabilize
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-01 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-01-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+# riddle 2
+
+    - name: Clone riddle-02 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[1].path }}.git"
+        dest: "/tmp/riddle-02-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-02
+      ansible.builtin.copy:
+        src: "/work/riddle-02-files/{{ item }}"
+        dest: "/tmp/riddle-02-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - .gitlab-ci.yml
+        - database.rs
+        - README.md
+
+    - name: Wait for GitLab Internal API to stabilize 2
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-02 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-02-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+# riddle 3
+
+    - name: Clone riddle-03 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[2].path }}.git"
+        dest: "/tmp/riddle-03-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-03-files
+      ansible.builtin.copy:
+        src: "/work/riddle-03-files/{{ item }}"
+        dest: "/tmp/riddle-03-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - .gitlab-ci.yml
+        - extension.h
+        - file.c
+        - README.md
+
+    - name: Wait for GitLab Internal API to stabilize 3
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-03 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-03-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+# riddle 4
+
+    - name: Clone riddle-04 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[3].path }}.git"
+        dest: "/tmp/riddle-04-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-04-files
+      ansible.builtin.copy:
+        src: "/work/riddle-04-files/{{ item }}"
+        dest: "/tmp/riddle-04-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - .gitlab-ci.yml
+        - ApplicationSettings.java
+        - Role.java
+        - SecurityContext.java
+        - Service.java
+        - User.java
+        - README.md
+
+    - name: Wait for GitLab Internal API to stabilize 4
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-04 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-04-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+#riddle 5
+
+    - name: Clone riddle-05 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[4].path }}.git"
+        dest: "/tmp/riddle-05-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-05-files
+      ansible.builtin.copy:
+        src: "/work/riddle-05-files/{{ item }}"
+        dest: "/tmp/riddle-05-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - README.md
+
+    - name: Wait for GitLab Internal API to stabilize 5
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-05 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-05-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+    # ---------------------------------------------------------
+    # 6. PERMISSIONS
+    # ---------------------------------------------------------
+    - name: Unprotect main branch
+      community.general.gitlab_protected_branch:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "root/{{ item.path }}"
+        name: "main"
+        state: present
+        push_access_level: developer
+        merge_access_levels: developer
+      loop: "{{ puzzle_projects }}"
+      register: protect_retry
+      until: protect_retry is success
+      retries: 20
+      delay: 3
+
+    - name: Grant riddle user access
+      community.general.gitlab_project_members:
+        api_url: "{{ gitlab_base_url }}"
+        api_token: "{{ gitlab_admin_pat }}"
+        project: "{{ puzzle_projects[0].path }}"
+        gitlab_user: "{{ riddle_username }}"
+        access_level: "developer"
+        state: "present"
+      register: member_retry
+      until: member_retry is success
+      retries: 20
+      delay: 3
+
+    # ---------------------------------------------------------
+    # 7. RUNNER CREATION (FIXED TAGS)
+    # ---------------------------------------------------------
+    - name: Define Runner Configurations
+      ansible.builtin.set_fact:
+        runners_config:
+          - description: "Ansible Docker Runner 1"
+            tags: "['docker', 'local', 'runner-01']"
+            token_path: "{{ runner_token_path }}_1"  # e.g. /path/token_1
+
+          - description: "Ansible Docker Runner 2"
+            tags: "['docker', 'local', 'runner-02']"
+            token_path: "{{ runner_token_path }}_2"  # e.g. /path/token_2
+
+    # ---------------------------------------------------------
+    # 1. CREATE BOTH RUNNERS (LOOP)
+    # ---------------------------------------------------------
+    - name: Create Instance Runners via Rails
+      community.docker.docker_container_exec:
+        container: "{{ gitlab_container_name }}"
+        command: >-
+          gitlab-rails runner "
+          STDOUT.sync = true;
+          
+          # Only destroy runners with THIS specific description
+          Ci::Runner.where(description: '{{ item.description }}').destroy_all;
+          
+          runner = Ci::Runner.new(
+            runner_type: 'instance_type',
+            description: '{{ item.description }}',
+            active: true,
+            access_level: :not_protected,
+            tag_list: {{ item.tags }},
+            run_untagged: true,
+            locked: false
+          );
+          
+          if runner.save!
+            puts runner.token
+          end"
+      register: runners_created
+      changed_when: runners_created.stdout | trim | length > 10
+      failed_when: runners_created.rc != 0
+      retries: 20
+      delay: 5
+      until: runners_created.rc == 0
+      loop: "{{ runners_config }}"
+
+    # ---------------------------------------------------------
+    # 2. SAVE TOKENS TO FILES
+    # ---------------------------------------------------------
+    - name: Save Runner Tokens to separate files
+      ansible.builtin.copy:
+        content: "{{ item.stdout | trim }}"
+        dest: "{{ item.item.token_path }}"
+        mode: "0644"
+      # Loop over the RESULTS of the previous task
+      loop: "{{ runners_created.results }}"
+      loop_control:
+        label: "{{ item.item.description }}"
+
+# ---------------------------------------------------------
+    # CLEANUP: CANCEL PENDING PIPELINES
+    # ---------------------------------------------------------
+
+# ---------------------------------------------------------
+    # GLOBAL CLEANUP: NUKE ALL PIPELINES
+    # ---------------------------------------------------------
+
+    - name: Wait for GitLab Internal API to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+
+# ---------------------------------------------------------
+    # GLOBAL CLEANUP: NUKE ALL PIPELINES (PYTHON SCRIPT)
+    # ---------------------------------------------------------
+    - name: "Nuke ALL pipelines in ALL projects (Python Script)"
+      ansible.builtin.shell:
+        cmd: |
+          {{ ansible_python_interpreter }} -c '
+          import json
+          import urllib.request
+          import urllib.error
+          import time
+
+          GITLAB_URL = "{{ gitlab_base_url }}"
+          TOKEN = "{{ gitlab_admin_pat }}"
+          HEADERS = {"PRIVATE-TOKEN": TOKEN}
+
+          def api_req(endpoint, method="GET"):
+              url = f"{GITLAB_URL}/api/v4/{endpoint}"
+              req = urllib.request.Request(url, headers=HEADERS, method=method)
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      return json.loads(response.read().decode())
+              except urllib.error.HTTPError as e:
+                  # Ignore 409 (Conflict) and 404 (Not Found) during cancellation
+                  if e.code in [409, 404]:
+                      return None
+                  print(f"Error {e.code} on {url}")
+                  return []
+
+          print("--- Starting Global Pipeline Cleanup ---")
+
+          # 1. Get ALL Projects
+          # (per_page=100 to get maximum, assuming you have <100 projects for now)
+          projects = api_req("projects?per_page=100&simple=true")
+          
+          if not projects:
+              print("No projects found.")
+              exit(0)
+
+          print(f"Found {len(projects)} projects. Scanning for pipelines...")
+
+          for p in projects:
+              pid = p["id"]
+              pname = p["path_with_namespace"]
+              
+              # 2. Check for Pending/Running pipelines in this project
+              # We check both states to be thorough
+              for status in ["pending", "running"]:
+                  pipelines = api_req(f"projects/{pid}/pipelines?status={status}")
+                  
+                  if pipelines:
+                      print(f"Project {pname}: Found {len(pipelines)} {status} pipelines.")
+                      
+                      for pipe in pipelines:
+                          pipe_id = pipe["id"]
+                          print(f" -> Canceling Pipeline {pipe_id}...")
+                          api_req(f"projects/{pid}/pipelines/{pipe_id}/cancel", method="POST")
+          
+          print("--- Cleanup Complete ---")
+          '
+      register: cleanup_output
+      changed_when: "'Canceling' in cleanup_output.stdout"

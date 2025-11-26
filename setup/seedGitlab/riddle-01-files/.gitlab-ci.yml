@@ -1,0 +1,67 @@
+stages:
+  - trigger_test
+
+trigger_riddle_tester:
+  stage: trigger_test
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      echo "Triggering Admin Pipeline via API..."
+
+      # 1. Build JSON Payload safely
+      PAYLOAD=$(jq -n \
+        --arg ref "main" \
+        --arg project "$CI_PROJECT_PATH" \
+        --arg sha "$CI_COMMIT_SHA" \
+        --arg tf "admin-riddle-01" \
+        --arg next "riddle-02" \
+        '{
+          ref: $ref,
+          variables: [
+            {key: "RIDDLE_PROJECT_PATH", value: $project},
+            {key: "RIDDLE_COMMIT_SHA", value: $sha},
+            {key: "testfolder", value: $tf},
+            {key: "NEXT_RIDDLE_PATH", value: $next}
+          ]
+        }')
+
+      # 2. Trigger the pipeline
+      echo "Sending Request..."
+      response=$(curl --silent --show-error --request POST \
+        --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data "$PAYLOAD" \
+        "${CI_SERVER_URL}/api/v4/projects/root%2Fadmin-ci-templates/pipeline")
+
+      # 3. Extract Pipeline ID
+      pipeline_id=$(echo "$response" | jq -r '.id')
+
+      if [ "$pipeline_id" == "null" ] || [ -z "$pipeline_id" ]; then
+        echo "Failed to trigger pipeline. Response:"
+        echo "$response"
+        exit 1
+      fi
+
+      echo "Pipeline triggered! ID: $pipeline_id. Waiting for result..."
+
+      # 4. Poll loop
+      while true; do
+        sleep 5
+        status_json=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_ADMIN_TOKEN}" \
+          "${CI_SERVER_URL}/api/v4/projects/root%2Fadmin-ci-templates/pipelines/${pipeline_id}")
+        
+        status=$(echo "$status_json" | jq -r '.status')
+        echo "   Status: $status"
+
+        if [ "$status" == "success" ]; then
+          echo "Admin Pipeline Succeeded!"
+          exit 0
+        elif [ "$status" == "failed" ] || [ "$status" == "canceled" ]; then
+          echo "Admin Pipeline Failed!"
+          exit 1
+        fi
+      done
+  tags:
+    - local

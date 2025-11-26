@@ -300,6 +300,7 @@
       loop:
         - .gitlab-ci.yml
         - config_writer.py
+        - readme.md
 
     - name: Wait for GitLab Internal API to stabilize
       ansible.builtin.pause:
@@ -342,6 +343,7 @@
       loop:
         - .gitlab-ci.yml
         - database.rs
+        - readme.md
 
     - name: Wait for GitLab Internal API to stabilize 2
       ansible.builtin.pause:
@@ -385,6 +387,7 @@
         - .gitlab-ci.yml
         - extension.h
         - file.c
+        - readme.md
 
     - name: Wait for GitLab Internal API to stabilize 3
       ansible.builtin.pause:
@@ -431,6 +434,7 @@
         - SecurityContext.java
         - Service.java
         - User.java
+        - readme.md
 
     - name: Wait for GitLab Internal API to stabilize 4
       ansible.builtin.pause:
@@ -440,6 +444,47 @@
       ansible.builtin.shell:
         cmd: |
           cd /tmp/riddle-04-repo
+          git config http.postBuffer 524288000
+          git config user.email "gitlab@local.lab"
+          git config user.name "GitLab Seeder"
+          git add .
+          git commit -m "Initial content" || echo "No changes"
+          git push origin main
+        executable: /bin/sh
+      register: push_riddle_out
+      until: push_riddle_out.rc == 0
+      retries: 20
+      delay: 30
+
+#riddle 5
+
+    - name: Clone riddle-05 repository
+      ansible.builtin.git:
+        repo: "http://root:{{ new_gitlab_root_password }}@gitlab/root/{{ puzzle_projects[4].path }}.git"
+        dest: "/tmp/riddle-05-repo"
+        version: "main"
+        force: true
+      register: clone_riddle
+      until: clone_riddle is success
+      retries: 20
+      delay: 5
+
+    - name: Copy initial files to riddle-05-files
+      ansible.builtin.copy:
+        src: "/work/riddle-05-files/{{ item }}"
+        dest: "/tmp/riddle-05-repo/{{ item }}"
+        mode: "0755"
+      loop:
+        - more_comming_soon_maybe.md
+
+    - name: Wait for GitLab Internal API to stabilize 5
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Push riddle-05 content (High Latency)
+      ansible.builtin.shell:
+        cmd: |
+          cd /tmp/riddle-05-repo
           git config http.postBuffer 524288000
           git config user.email "gitlab@local.lab"
           git config user.name "GitLab Seeder"

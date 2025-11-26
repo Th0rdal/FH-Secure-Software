@@ -10,6 +10,7 @@ Auch wenn der Fehler schnell zu lösen ist, hat er trotzdem große Konsequenzen.
 
 Die Datei kann direkt in GitLab editiert werden.
 Dazu Datei anklicken, Edit, Edit single file. 
+Edit in Web IDE geht nicht.
 
 Nach dem bearbeiten rechts oben auf Commit changes klicken.
 Wenn es erfolgreich gelöst wurde, findet man neben dem riddle-01 auch das riddle-02 Project.
